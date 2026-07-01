@@ -243,7 +243,7 @@ Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
     -Action {
         $response = Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 500) {
+        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) {
             throw "Odysseus did not report a healthy response on http://localhost:7000."
         }
     } `

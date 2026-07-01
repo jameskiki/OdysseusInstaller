@@ -122,7 +122,7 @@ configure_gateway_endpoints() {
 
     gateway_ip=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
     if [ -z "$gateway_ip" ]; then
-        print_fail "Unable to detect Windows host gateway IP from /etc/resolv.conf."
+        print_fail "Unable to detect Windows host gateway IP from /etc/resolv.conf. Verify WSL networking is active and rerun."
     fi
 
     upsert_env_key "LLM_HOST" "$gateway_ip" "$env_file"
@@ -135,6 +135,7 @@ configure_gateway_endpoints() {
 
 wait_for_ollama_gateway() {
     local gateway_ip="$1"
+    # Poll for ~50s (25 attempts * 2s) to allow Ollama startup after Windows session changes.
     for _ in $(seq 1 25); do
         if curl -s -f "http://${gateway_ip}:11434/api/tags" > /dev/null 2>&1; then
             return 0
@@ -227,7 +228,7 @@ configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Checking reachability of Windows-hosted Ollama from WSL..."
-wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL."
+wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Ollama is running on Windows ('ollama serve') and local firewall policy allows port 11434."
 print_ok "Ollama endpoint reachable from WSL."
 
 print_step "Deploying application containers..."
@@ -250,7 +251,7 @@ if [ "$FIRST_BOOT" = true ]; then
     echo "FIRST TIME INITIALIZATION COMPLETED"
     echo "===================================================="
     echo "Initial credential output was saved to: $password_log"
-    echo "Review and store it securely before sharing this machine."
+    echo "Review and store it securely before allowing additional users or remote clients to access this host."
     echo -e "====================================================\e[0m\n"
 fi
 
