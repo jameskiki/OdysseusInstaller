@@ -13,10 +13,25 @@ function Get-InstalledWslDistros {
     return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
+function Install-UbuntuDistro {
+    Write-Host "`n[INFO] No Ubuntu WSL distribution was found on this machine." -ForegroundColor Yellow
+    $choice = Read-Host "Install Ubuntu via WSL now? An elevated window will open to run the installer. [Y/N]"
+    if ($choice -notmatch '^(y|yes)$') {
+        throw "Ubuntu WSL installation declined. Run 'wsl --install -d Ubuntu' in an elevated PowerShell window, reboot if prompted, then rerun."
+    }
+
+    Write-Host "[INFO] Opening elevated installer for 'wsl --install -d Ubuntu'..." -ForegroundColor Cyan
+    Start-Process powershell.exe `
+        -ArgumentList '-NoProfile -Command "wsl --install -d Ubuntu; Read-Host ''Press Enter to close this window...''"' `
+        -Verb RunAs -Wait
+
+    throw "WSL Ubuntu installation has run. If Windows asked you to reboot, do so now. Then reopen this wizard to continue."
+}
+
 function Resolve-UbuntuDistro {
     $distros = Get-InstalledWslDistros
     if (-not $distros) {
-        throw "No WSL distributions are installed. Run 'wsl --install -d Ubuntu', complete the first-launch Linux user setup, and then retry."
+        Install-UbuntuDistro  # always throws after guiding the user through install
     }
 
     if ($distros -contains 'Ubuntu') {
@@ -25,7 +40,7 @@ function Resolve-UbuntuDistro {
 
     $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1
     if (-not $ubuntuVariant) {
-        throw "No Ubuntu WSL distribution was found. Install Ubuntu with 'wsl --install -d Ubuntu' and retry."
+        Install-UbuntuDistro  # always throws after guiding the user through install
     }
 
     return $ubuntuVariant
