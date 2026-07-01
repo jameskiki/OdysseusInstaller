@@ -208,14 +208,18 @@ ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
-    git clone --branch "$ODYSSEUS_REPO_REF" --single-branch https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR" && cd "$TARGET_DIR"
+    git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR" && cd "$TARGET_DIR"
     cp .env.example .env
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
     git fetch origin "$ODYSSEUS_REPO_REF"
     git checkout "$ODYSSEUS_REPO_REF"
-    git pull --ff-only origin "$ODYSSEUS_REPO_REF" && print_ok "Odysseus workspace updated."
+    if git pull --ff-only origin "$ODYSSEUS_REPO_REF"; then
+        print_ok "Odysseus workspace updated."
+    else
+        print_fail "Odysseus workspace update failed because local checkout diverged from origin/$ODYSSEUS_REPO_REF. Resolve git state in ~/odysseus and rerun."
+    fi
     if [ ! -f .env ]; then
         cp .env.example .env
         print_ok "Environment file created from the current template."
@@ -228,7 +232,7 @@ configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Checking reachability of Windows-hosted Ollama from WSL..."
-wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Ollama is running on Windows ('ollama serve') and local firewall policy allows port 11434."
+wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Ollama is running on Windows with OLLAMA_HOST=0.0.0.0:11434 (for example: 'setx OLLAMA_HOST 0.0.0.0:11434' then 'ollama serve') and local firewall policy allows port 11434."
 print_ok "Ollama endpoint reachable from WSL."
 
 print_step "Deploying application containers..."
