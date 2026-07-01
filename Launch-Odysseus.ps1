@@ -23,7 +23,7 @@ function Resolve-UbuntuDistro {
         return 'Ubuntu'
     }
 
-    $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu([\-].+)?$' } | Select-Object -First 1
+    $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1
     if (-not $ubuntuVariant) {
         throw "No Ubuntu WSL distribution was found. Install Ubuntu with 'wsl --install -d Ubuntu' and retry."
     }
@@ -242,7 +242,20 @@ Invoke-Step `
 Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
     -Action {
-        Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+        $reachable = $false
+        for ($i = 0; $i -lt 6; $i++) {
+            try {
+                Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+                $reachable = $true
+                break
+            }
+            catch {
+                Start-Sleep -Seconds 5
+            }
+        }
+        if (-not $reachable) {
+            throw "Odysseus did not become reachable on http://localhost:7000."
+        }
     } `
     -FailMessage "Odysseus endpoint check failed."
 

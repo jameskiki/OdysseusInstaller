@@ -174,7 +174,7 @@ begin
     end;
     if Exec(
       ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
-      '-NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) { exit 10 }; $distros = wsl -l -q 2>$null; if (($distros | Where-Object { $_.Trim() -match ''^Ubuntu([\-].+)?$'' }).Count -eq 0) { exit 11 }"',
+      '-NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) { exit 10 }; $distros = wsl -l -q 2>$null; if (($distros | Where-Object { $_.Trim() -match ''^Ubuntu(\-.*)?$'' }).Count -eq 0) { exit 11 }"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
       if ResultCode = 10 then
         MsgBox('WSL is not installed yet. Run "wsl --install -d Ubuntu" in an elevated terminal, reboot if Windows requests it, and then launch Odysseus.', mbInformation, MB_OK)
