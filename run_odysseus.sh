@@ -83,6 +83,68 @@ ensure_docker_running() {
     wait_for_docker
 }
 
+upsert_env_key() {
+    local key="$1"
+    local value="$2"
+    local env_file="$3"
+
+    if grep -q "^${key}=" "$env_file"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    fi
+}
+
+configure_compose_files() {
+    local env_file="$1"
+    local compose_files="docker-compose.yml"
+
+    if command -v nvidia-smi > /dev/null 2>&1; then
+        compose_files="${compose_files}:docker-compose.gpu-nvidia.yml"
+    fi
+
+    if [ "${ODYSSEUS_HOST_MODE:-0}" = "1" ]; then
+        cat > docker-compose.host-mode.override.yml <<'HOSTEOF'
+services:
+  odysseus:
+    ports:
+      - "0.0.0.0:7000:7000"
+HOSTEOF
+        compose_files="${compose_files}:docker-compose.host-mode.override.yml"
+    fi
+
+    upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
+}
+
+configure_gateway_endpoints() {
+    local env_file="$1"
+    local gateway_ip
+
+    gateway_ip=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
+    if [ -z "$gateway_ip" ]; then
+        print_fail "Unable to detect Windows host gateway IP from /etc/resolv.conf."
+    fi
+
+    upsert_env_key "LLM_HOST" "$gateway_ip" "$env_file"
+    upsert_env_key "LLM_HOSTS" "$gateway_ip" "$env_file"
+    upsert_env_key "OLLAMA_BASE_URL" "http://${gateway_ip}:11434/v1" "$env_file"
+    upsert_env_key "EMBEDDING_URL" "http://${gateway_ip}:11434/v1/embeddings" "$env_file"
+
+    export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_ip"
+}
+
+wait_for_ollama_gateway() {
+    local gateway_ip="$1"
+    for _ in $(seq 1 25); do
+        if curl -s -f "http://${gateway_ip}:11434/api/tags" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+
+    return 1
+}
+
 trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
 
 print_step "Refreshing sudo credentials for package management..."
@@ -99,16 +161,15 @@ sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release && print_
 
 print_step "Validating enterprise-compliant open-source Docker Engine..."
 if ! command -v docker &> /dev/null; then
-    # Add Docker's official apt repository
     sudo install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     sudo chmod a+r /etc/apt/keyrings/docker.gpg
-    
+
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
+
     sudo apt-get update -y -qq
-    sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     print_ok "Open-source Docker Engine deployed."
 else
     print_ok "Docker Engine verified."
@@ -142,41 +203,32 @@ print_step "Synchronizing the Odysseus project source workspace..."
 TARGET_DIR="$HOME/odysseus"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
+ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
-    git clone https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR" && cd "$TARGET_DIR"
-    # Set GPU profile mappings inside .env if NVIDIA core layer is present
-    if command -v nvidia-smi &> /dev/null; then
-        cp .env.example .env
-        printf '\nCOMPOSE_FILE=docker-compose.yml:docker-compose.gpu-nvidia.yml\n' >> .env
-    else
-        cp .env.example .env
-    fi
-    # If host mode, bind to all interfaces instead of localhost only
-    if [ "$ODYSSEUS_HOST_MODE" = "1" ]; then
-        sed -i 's/127\.0\.0\.1/0.0.0.0/g' docker-compose.yml
-        print_ok "Odysseus workspace initialized (host mode: bound to 0.0.0.0)."
-    else
-        print_ok "Odysseus workspace initialized."
-    fi
+    git clone --branch "$ODYSSEUS_REPO_REF" --single-branch https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR" && cd "$TARGET_DIR"
+    cp .env.example .env
+    print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
-    git pull --ff-only && print_ok "Odysseus workspace updated."
+    git fetch origin "$ODYSSEUS_REPO_REF"
+    git checkout "$ODYSSEUS_REPO_REF"
+    git pull --ff-only origin "$ODYSSEUS_REPO_REF" && print_ok "Odysseus workspace updated."
     if [ ! -f .env ]; then
-        if command -v nvidia-smi &> /dev/null; then
-            cp .env.example .env
-            printf '\nCOMPOSE_FILE=docker-compose.yml:docker-compose.gpu-nvidia.yml\n' >> .env
-        else
-            cp .env.example .env
-        fi
+        cp .env.example .env
         print_ok "Environment file created from the current template."
     fi
-    # If host mode and not already bound to 0.0.0.0, update it
-    if [ "$ODYSSEUS_HOST_MODE" = "1" ] && ! grep -q '0\.0\.0\.0:7000' docker-compose.yml 2>/dev/null; then
-        sed -i 's/127\.0\.0\.1/0.0.0.0/g' docker-compose.yml
-    fi
 fi
+
+print_step "Applying host connectivity and compose profile settings..."
+configure_compose_files ".env"
+configure_gateway_endpoints ".env"
+print_ok "Environment endpoints and compose profiles aligned."
+
+print_step "Checking reachability of Windows-hosted Ollama from WSL..."
+wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL."
+print_ok "Ollama endpoint reachable from WSL."
 
 print_step "Deploying application containers..."
 sudo docker compose up -d --build && print_ok "Containers active in background."
@@ -189,18 +241,17 @@ until curl -s -f http://127.0.0.1:7000 > /dev/null; do
 done
 echo ""; print_ok "Application socket online."
 
-# If this is the first deployment, extract the randomly generated administrative password
 if [ "$FIRST_BOOT" = true ]; then
+    password_log="$HOME/.odysseus-initial-admin-password.txt"
+    sudo docker compose logs odysseus | grep -i "password" > "$password_log" || sudo docker compose logs odysseus > "$password_log"
+    chmod 600 "$password_log" || true
+
     echo -e "\n\e[1;33m===================================================="
     echo "FIRST TIME INITIALIZATION COMPLETED"
     echo "===================================================="
-    echo "Your unique generated admin password is listed below:"
-    echo "----------------------------------------------------"
-    sudo docker compose logs odysseus | grep -i "password" || sudo docker compose logs
-    echo "----------------------------------------------------"
-    echo "Copy this password. You will need it to log in now!"
+    echo "Initial credential output was saved to: $password_log"
+    echo "Review and store it securely before sharing this machine."
     echo -e "====================================================\e[0m\n"
-    read -p "Press [Enter] once you have copied your password to launch Edge..."
 fi
 
 trap - EXIT

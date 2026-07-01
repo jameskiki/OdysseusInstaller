@@ -1,11 +1,83 @@
 Clear-Host
 $ErrorActionPreference = 'Stop'
 
-$WslDistro = 'Ubuntu'
+$WslDistro = $null
 $BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
 $HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
 $IsHostMode = Test-Path $HostModeFile
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
+$env:ODYSSEUS_WSL_RESTART_REQUIRED = '0'
+
+function Get-InstalledWslDistros {
+    $distros = & wsl.exe -l -q 2>$null
+    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Resolve-UbuntuDistro {
+    $distros = Get-InstalledWslDistros
+    if (-not $distros) {
+        throw "No WSL distributions are installed. Run 'wsl --install -d Ubuntu', complete the first-launch Linux user setup, and then retry."
+    }
+
+    if ($distros -contains 'Ubuntu') {
+        return 'Ubuntu'
+    }
+
+    $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu([\-].+)?$' } | Select-Object -First 1
+    if (-not $ubuntuVariant) {
+        throw "No Ubuntu WSL distribution was found. Install Ubuntu with 'wsl --install -d Ubuntu' and retry."
+    }
+
+    return $ubuntuVariant
+}
+
+function Ensure-UbuntuInitialized {
+    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+
+    Write-Host "`n[INFO] Ubuntu setup needs one-time Linux user creation." -ForegroundColor Yellow
+    Write-Host "A Linux terminal will open now. Complete the username/password prompts, then close it." -ForegroundColor Yellow
+    & wsl.exe -d $WslDistro
+
+    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ubuntu initialization is incomplete. Launch 'wsl -d $WslDistro' once, finish Linux user creation, then rerun Odysseus."
+    }
+}
+
+function Ensure-WslSystemdEnabled {
+    $command = @'
+if [ -f /etc/wsl.conf ] && grep -qi "^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true[[:space:]]*$" /etc/wsl.conf; then
+  exit 0
+fi
+
+if [ -f /etc/wsl.conf ] && grep -qi "^[[:space:]]*\[boot\][[:space:]]*$" /etc/wsl.conf; then
+  if grep -qi "^[[:space:]]*systemd[[:space:]]*=" /etc/wsl.conf; then
+    sed -i -E "s|^[[:space:]]*systemd[[:space:]]*=.*$|systemd=true|I" /etc/wsl.conf
+  else
+    printf "\nsystemd=true\n" >> /etc/wsl.conf
+  fi
+else
+  printf "\n[boot]\nsystemd=true\n" >> /etc/wsl.conf
+fi
+
+exit 3
+'@
+
+    & wsl.exe -d $WslDistro -u root -- bash -lc $command
+    if ($LASTEXITCODE -eq 3) {
+        $env:ODYSSEUS_WSL_RESTART_REQUIRED = '1'
+        & wsl.exe --shutdown
+        Start-Sleep -Seconds 2
+        return
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to verify or update /etc/wsl.conf for systemd support."
+    }
+}
 
 function Ensure-OllamaAvailable {
     $ollama = Get-Command ollama.exe -ErrorAction SilentlyContinue
@@ -45,18 +117,16 @@ function Ensure-OllamaEndpoint {
         throw "ollama.exe was not found after installation step."
     }
 
-    # If Ollama is running but bound only to loopback, restart it so the new binding takes effect.
     $allInterfaces = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
     $loopbackOnly = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalAddress -eq '127.0.0.1' }
 
     if ($allInterfaces) {
-        return  # Already listening on all interfaces.
+        return
     }
 
     if ($loopbackOnly) {
-        # Running but loopback-only — stop so we can restart with the correct binding.
         Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 800
     }
@@ -76,23 +146,6 @@ function Ensure-OllamaEndpoint {
     }
 
     throw "Ollama did not become reachable on http://localhost:11434. Start it manually with: `"$($ollama.Source)`" serve"
-}
-
-function Configure-OdysseusModelEndpoints {
-    $commands = @(
-        "cd ~/odysseus || exit 0",
-        "if [ ! -f .env ]; then exit 0; fi",
-        "if grep -q '^LLM_HOST=' .env; then sed -i 's/^LLM_HOST=.*/LLM_HOST=host.docker.internal/' .env; else echo 'LLM_HOST=host.docker.internal' >> .env; fi",
-        "if grep -q '^LLM_HOSTS=' .env; then sed -i 's|^LLM_HOSTS=.*|LLM_HOSTS=host.docker.internal|' .env; else echo 'LLM_HOSTS=host.docker.internal' >> .env; fi",
-        "if grep -q '^OLLAMA_BASE_URL=' .env; then sed -i 's|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=http://host.docker.internal:11434/v1|' .env; else echo 'OLLAMA_BASE_URL=http://host.docker.internal:11434/v1' >> .env; fi",
-        "if grep -q '^EMBEDDING_URL=' .env; then sed -i 's|^EMBEDDING_URL=.*|EMBEDDING_URL=http://host.docker.internal:11434/v1/embeddings|' .env; else echo 'EMBEDDING_URL=http://host.docker.internal:11434/v1/embeddings' >> .env; fi"
-    )
-
-    $commandText = ($commands -join '; ')
-    & wsl.exe -d $WslDistro -- bash -lc $commandText
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to update model endpoint settings inside ~/odysseus/.env."
-    }
 }
 
 function Invoke-Step {
@@ -125,18 +178,29 @@ Invoke-Step `
     -FailMessage "WSL is not installed."
 
 Invoke-Step `
-    -Intent "Checking that the Ubuntu WSL distribution is installed..." `
+    -Intent "Selecting the Ubuntu WSL distribution for Odysseus..." `
     -Action {
-        $distros = & wsl.exe -l -q 2>$null
-        $trimmedDistros = @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if (-not $trimmedDistros) {
-            throw "No WSL distributions are installed. Run 'wsl --install -d Ubuntu', complete the first-launch Linux user setup, and then retry."
-        }
-        if ($trimmedDistros -notcontains $WslDistro) {
-            throw "Ubuntu is not installed in WSL. Run 'wsl --install -d Ubuntu', complete the first-launch Linux user setup, and then retry."
+        $script:WslDistro = Resolve-UbuntuDistro
+        Write-Host "Using WSL distro: $script:WslDistro" -ForegroundColor DarkGray
+    } `
+    -FailMessage "Ubuntu WSL distribution lookup failed."
+
+Invoke-Step `
+    -Intent "Ensuring Ubuntu initialization is complete (Linux user created)..." `
+    -Action {
+        Ensure-UbuntuInitialized
+    } `
+    -FailMessage "Ubuntu user initialization is incomplete."
+
+Invoke-Step `
+    -Intent "Enforcing WSL systemd support for reliable Docker daemon management..." `
+    -Action {
+        Ensure-WslSystemdEnabled
+        if ($env:ODYSSEUS_WSL_RESTART_REQUIRED -eq '1') {
+            Write-Host "WSL systemd was enabled and WSL was restarted." -ForegroundColor DarkGray
         }
     } `
-    -FailMessage "Ubuntu is not installed in WSL."
+    -FailMessage "Failed to enforce WSL systemd support."
 
 Invoke-Step `
     -Intent "Checking local Ollama runtime for model discovery compatibility..." `
@@ -147,13 +211,6 @@ Invoke-Step `
     -FailMessage "Ollama is not available."
 
 Invoke-Step `
-    -Intent "Aligning Odysseus model endpoint settings for Docker-to-host connectivity..." `
-    -Action {
-        Configure-OdysseusModelEndpoints
-    } `
-    -FailMessage "Failed to apply model endpoint settings."
-
-Invoke-Step `
     -Intent "Staging the Linux bootstrap script inside the Ubuntu workspace..." `
     -Action {
         if (-not (Test-Path $BootstrapScript)) {
@@ -162,7 +219,7 @@ Invoke-Step `
 
         $linuxSourcePath = (& wsl.exe -d $WslDistro -- wslpath -a $BootstrapScript 2>$null).Trim()
         if ([string]::IsNullOrWhiteSpace($linuxSourcePath)) {
-            throw "Unable to translate the installed bootstrap script path into WSL. If Ubuntu has not been initialized yet, run 'wsl -d Ubuntu' once and finish the Linux user setup first."
+            throw "Unable to translate the installed bootstrap script path into WSL. Run 'wsl -d $WslDistro' once and retry."
         }
 
         & wsl.exe -d $WslDistro -- bash -lc "tr -d '\r' < '$linuxSourcePath' > ~/run_odysseus.sh && chmod +x ~/run_odysseus.sh"
@@ -174,13 +231,23 @@ Invoke-Step `
 
 Invoke-Step `
     -Intent "Crossing OS boundary to trigger the Linux Environment Automator..." `
-    -Action { 
+    -Action {
         & wsl.exe -d $WslDistro -- bash -lc '~/run_odysseus.sh'
         if ($LASTEXITCODE -ne 0) {
             throw "The Linux bootstrap script exited with code $LASTEXITCODE."
         }
     } `
     -FailMessage "The Linux initialization script encountered a breaking error during setup."
+
+Invoke-Step `
+    -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
+    -Action {
+        $response = Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 500) {
+            throw "Odysseus did not report a healthy response on http://localhost:7000."
+        }
+    } `
+    -FailMessage "Odysseus endpoint check failed."
 
 Invoke-Step `
     -Intent "Opening the Odysseus web interface in the default browser..." `
