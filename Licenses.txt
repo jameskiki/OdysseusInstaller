@@ -1,0 +1,22 @@
+======================================================================
+ODYSSEUS AI ENVIRONMENT - OPEN SOURCE PACKAGES & LICENSES
+======================================================================
+By installing this environment, you acknowledge and agree to the 
+terms and licensing conditions of the underlying software components.
+
+1. WINDOWS SUBSYSTEM FOR LINUX (WSL 2)
+   - License: MIT License / GNU GPL v2 (Provided natively by Microsoft)
+
+2. DOCKER ENGINE / COMPOSE (CLI-ONLY)
+   - License: Apache License 2.0
+   - Bypasses proprietary "Docker Desktop". 100% Free for Enterprise.
+
+3. UBUNTU LINUX DISTRIBUTION
+   - License: GNU GPL / Canonical Ltd Open Source provisions.
+
+4. NVIDIA CONTAINER TOOLKIT
+   - License: Apache License 2.0 / Proprietary Driver EULA
+
+5. GIT & CURL UTILITIES
+   - License: GNU GPL v2 / MIT Derivative licenses.
+======================================================================
