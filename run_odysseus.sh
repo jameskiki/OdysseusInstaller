@@ -123,6 +123,7 @@ configure_gateway_endpoints() {
     gateway_ip=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
     if [ -z "$gateway_ip" ]; then
         print_fail "Unable to detect Windows host gateway IP from /etc/resolv.conf. Verify WSL networking is active and rerun."
+        return 1
     fi
 
     upsert_env_key "LLM_HOST" "$gateway_ip" "$env_file"
@@ -236,7 +237,7 @@ configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Checking reachability of Windows-hosted Ollama from WSL..."
-wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Ollama is running on Windows with OLLAMA_HOST=0.0.0.0:11434 (for example: 'setx OLLAMA_HOST 0.0.0.0:11434' then 'ollama serve') and local firewall policy allows port 11434."
+wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Windows Ollama is running with OLLAMA_HOST=0.0.0.0:11434 and firewall allows port 11434."
 print_ok "Ollama endpoint reachable from WSL."
 
 print_step "Deploying application containers..."
@@ -252,11 +253,12 @@ echo ""; print_ok "Application socket online."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
-    if ! sudo docker compose logs odysseus | grep -i "password" > "$password_log"; then
+    odysseus_logs="$(sudo docker compose logs odysseus)"
+    if ! printf '%s\n' "$odysseus_logs" | grep -i "password" > "$password_log"; then
         {
             echo "No explicit password line was found in odysseus logs. Recent startup logs are included below:"
             echo
-            sudo docker compose logs odysseus | tail -n 200
+            printf '%s\n' "$odysseus_logs" | tail -n 200
         } > "$password_log"
     fi
     chmod 600 "$password_log" || true
