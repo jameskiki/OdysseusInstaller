@@ -208,7 +208,11 @@ ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
-    git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR" && cd "$TARGET_DIR"
+    if git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
+        cd "$TARGET_DIR"
+    else
+        print_fail "Failed to clone Odysseus branch '$ODYSSEUS_REPO_REF'. Verify the branch exists and rerun."
+    fi
     cp .env.example .env
     print_ok "Odysseus workspace initialized."
 else
@@ -248,7 +252,13 @@ echo ""; print_ok "Application socket online."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
-    sudo docker compose logs odysseus | grep -i "password" > "$password_log" || sudo docker compose logs odysseus > "$password_log"
+    if ! sudo docker compose logs odysseus | grep -i "password" > "$password_log"; then
+        {
+            echo "No explicit password line was found in odysseus logs. Recent startup logs are included below:"
+            echo
+            sudo docker compose logs odysseus | tail -n 200
+        } > "$password_log"
+    fi
     chmod 600 "$password_log" || true
 
     echo -e "\n\e[1;33m===================================================="
