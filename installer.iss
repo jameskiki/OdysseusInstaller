@@ -8,6 +8,7 @@ Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
 LicenseFile=Licenses.txt
+SetupLogging=yes
 
 [Files]
 Source: "Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation

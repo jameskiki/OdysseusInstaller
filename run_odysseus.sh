@@ -7,6 +7,48 @@ print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
 
+wait_for_apt_unlock() {
+    local locks=(
+        /var/lib/apt/lists/lock
+        /var/lib/dpkg/lock-frontend
+        /var/lib/dpkg/lock
+        /var/cache/apt/archives/lock
+    )
+
+    for _ in $(seq 1 60); do
+        local locked=0
+        for lock in "${locks[@]}"; do
+            if sudo fuser "$lock" > /dev/null 2>&1; then
+                locked=1
+                break
+            fi
+        done
+
+        if [ "$locked" -eq 0 ]; then
+            return 0
+        fi
+
+        echo "[INFO] apt/dpkg lock detected. Waiting for other package operations to finish..."
+        sleep 2
+    done
+
+    return 1
+}
+
+run_apt_update() {
+    local apt_args=(
+        -o Acquire::Retries=3
+        -o Acquire::http::Timeout=30
+        -o Acquire::https::Timeout=30
+    )
+
+    if command -v timeout > /dev/null 2>&1; then
+        sudo timeout 600 apt-get update "${apt_args[@]}"
+    else
+        sudo apt-get update "${apt_args[@]}"
+    fi
+}
+
 wait_for_docker() {
     for _ in $(seq 1 20); do
         if sudo docker info > /dev/null 2>&1; then
@@ -43,8 +85,14 @@ ensure_docker_running() {
 
 trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
 
+print_step "Refreshing sudo credentials for package management..."
+sudo -v || print_fail "Sudo authentication failed."
+
+print_step "Waiting for package manager locks to clear..."
+wait_for_apt_unlock || print_fail "Timed out waiting for apt/dpkg lock files."
+
 print_step "Updating Linux package indexes..."
-sudo apt-get update -y -qq && print_ok "Repositories updated."
+run_apt_update && print_ok "Repositories updated."
 
 print_step "Verifying system core utility dependencies..."
 sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release && print_ok "Core utilities verified."
