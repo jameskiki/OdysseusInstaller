@@ -7,6 +7,40 @@ print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
 
+run_with_progress() {
+    local label="$1"
+    shift
+
+    local log_file
+    log_file=$(mktemp /tmp/odysseus-progress.XXXXXX.log)
+    "$@" >"$log_file" 2>&1 &
+    local pid=$!
+    local frames='|/-\\'
+    local frame=0
+    local elapsed=0
+
+    while kill -0 "$pid" > /dev/null 2>&1; do
+        printf '\r[WORKING] %s %s (%ss)' "$label" "${frames:frame:1}" "$elapsed"
+        sleep 1
+        frame=$(((frame + 1) % 4))
+        elapsed=$((elapsed + 1))
+    done
+
+    wait "$pid"
+    local exit_code=$?
+    printf '\r%-100s\r' ''
+
+    if [ "$exit_code" -ne 0 ]; then
+        echo "[INFO] Last installer output:"
+        tail -n 20 "$log_file" || true
+        rm -f "$log_file"
+        return "$exit_code"
+    fi
+
+    rm -f "$log_file"
+    return 0
+}
+
 wait_for_apt_unlock() {
     local locks=(
         /var/lib/apt/lists/lock
@@ -159,7 +193,7 @@ print_step "Updating Linux package indexes..."
 run_apt_update && print_ok "Repositories updated."
 
 print_step "Verifying system core utility dependencies..."
-sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release && print_ok "Core utilities verified."
+run_with_progress "Installing core Linux utilities" sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release && print_ok "Core utilities verified."
 
 print_step "Validating enterprise-compliant open-source Docker Engine..."
 if ! command -v docker &> /dev/null; then
@@ -170,32 +204,74 @@ if ! command -v docker &> /dev/null; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    sudo apt-get update -y -qq
-    sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    run_with_progress "Refreshing package indexes for Docker" sudo apt-get update -y -qq
+    run_with_progress "Installing Docker Engine packages" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     print_ok "Open-source Docker Engine deployed."
 else
     print_ok "Docker Engine verified."
 fi
 
 print_step "Ensuring background Docker daemon service is active..."
-ensure_docker_running && print_ok "Docker daemon activated."
+if ensure_docker_running; then
+    print_ok "Docker daemon activated."
+else
+    print_fail "Docker daemon could not be started. Verify Docker Desktop/Engine state and rerun."
+fi
 
 print_step "Validating graphics card passthrough configurations..."
 if ! command -v nvidia-smi &> /dev/null; then
     print_ok "Host has no NVIDIA graphics pipelines. Proceeding with CPU-Fallback path."
 else
     if ! command -v nvidia-ctk &> /dev/null; then
+        gpu_setup_failed=0
+        had_daemon_backup=0
+        daemon_backup_file="/tmp/odysseus-daemon-json.backup"
+
+        if sudo test -f /etc/docker/daemon.json; then
+            sudo cp /etc/docker/daemon.json "$daemon_backup_file"
+            had_daemon_backup=1
+        fi
+
         curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
         curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
-        sudo apt-get update -y -qq && sudo apt-get install -y nvidia-container-toolkit -qq
-        sudo nvidia-ctk runtime configure --runtime=docker > /dev/null
+        run_with_progress "Refreshing package indexes for NVIDIA toolkit" sudo apt-get update -y -qq
+        run_with_progress "Installing NVIDIA container toolkit" sudo apt-get install -y nvidia-container-toolkit -qq
+
+        if ! sudo nvidia-ctk runtime configure --runtime=docker > /dev/null; then
+            gpu_setup_failed=1
+        fi
+
         if command -v systemctl > /dev/null 2>&1 && [ "$(ps -o comm= 1 2> /dev/null)" = "systemd" ]; then
             sudo systemctl restart docker > /dev/null 2>&1 || true
         elif command -v service > /dev/null 2>&1; then
             sudo service docker restart > /dev/null 2>&1 || true
         fi
-        ensure_docker_running
-        print_ok "NVIDIA Container Toolkit linked successfully."
+
+        if ! ensure_docker_running; then
+            gpu_setup_failed=1
+        fi
+
+        if [ "$gpu_setup_failed" -eq 1 ]; then
+            echo "[WARN] NVIDIA runtime setup failed; restoring Docker config and continuing in CPU mode."
+            if [ "$had_daemon_backup" -eq 1 ]; then
+                sudo cp "$daemon_backup_file" /etc/docker/daemon.json
+            else
+                sudo rm -f /etc/docker/daemon.json
+            fi
+
+            if command -v systemctl > /dev/null 2>&1 && [ "$(ps -o comm= 1 2> /dev/null)" = "systemd" ]; then
+                sudo systemctl restart docker > /dev/null 2>&1 || true
+            elif command -v service > /dev/null 2>&1; then
+                sudo service docker restart > /dev/null 2>&1 || true
+            fi
+
+            ensure_docker_running || print_fail "Docker daemon failed after NVIDIA rollback. Check /etc/docker/daemon.json and rerun."
+            print_ok "Continuing with CPU-Fallback path."
+        else
+            print_ok "NVIDIA Container Toolkit linked successfully."
+        fi
+
+        rm -f "$daemon_backup_file" || true
     else
         print_ok "NVIDIA runtime hooks verified."
     fi
@@ -241,7 +317,7 @@ wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot rea
 print_ok "Ollama endpoint reachable from WSL."
 
 print_step "Deploying application containers..."
-sudo docker compose up -d --build && print_ok "Containers active in background."
+run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers active in background."
 
 print_step "Polling local network port 7000 to verify runtime status..."
 TIMEOUT=45; COUNT=0
