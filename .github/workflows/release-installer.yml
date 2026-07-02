@@ -1,0 +1,89 @@
+name: Build and Release Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse tag version and sync installer metadata
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag) {
+            throw "Could not determine tag from github.ref_name"
+          }
+
+          if ($tag.StartsWith("v")) {
+            $version = $tag.Substring(1)
+          } else {
+            $version = $tag
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z\.]+)?$') {
+            throw "Tag '$tag' is not a valid version. Expected v<major>.<minor>.<patch> (optional pre-release suffix)."
+          }
+
+          $issPath = Join-Path $PWD 'installer.iss'
+          $issContent = Get-Content -Path $issPath -Raw
+          $updatedContent = [regex]::Replace($issContent, '(?m)^AppVersion=.*$', "AppVersion=$version")
+          if ($updatedContent -eq $issContent) {
+            throw "Could not find AppVersion=... in installer.iss"
+          }
+          Set-Content -Path $issPath -Value $updatedContent -Encoding ascii
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Compile Inno Setup script
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: installer.iss
+
+      - name: Resolve version and artifact paths
+        id: vars
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = "${{ steps.version.outputs.version }}"
+
+          $builtExe = Get-ChildItem -Path "Output" -Filter "*.exe" | Select-Object -First 1
+          if (-not $builtExe) {
+            throw "No installer executable found in Output/"
+          }
+
+          $releaseExe = "OdysseusSetup-$version.exe"
+          $releaseExePath = Join-Path $PWD $releaseExe
+          Copy-Item -Path $builtExe.FullName -Destination $releaseExePath -Force
+
+          $hash = (Get-FileHash -Path $releaseExePath -Algorithm SHA256).Hash.ToLower()
+          $hashFile = "$releaseExe.sha256"
+          "$hash  $releaseExe" | Set-Content -Path $hashFile -Encoding ascii
+
+          $isPrerelease = if ($tag -match "-(alpha|beta|rc)(\.|\d|$)") { "true" } else { "false" }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_exe=$releaseExe" >> $env:GITHUB_OUTPUT
+          "release_sha=$hashFile" >> $env:GITHUB_OUTPUT
+          "prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ steps.vars.outputs.prerelease }}
+          files: |
+            ${{ steps.vars.outputs.release_exe }}
+            ${{ steps.vars.outputs.release_sha }}
