@@ -58,9 +58,13 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $version = "${{ steps.version.outputs.version }}"
 
-          $builtExe = Get-ChildItem -Path "Output" -Filter "*.exe" | Select-Object -First 1
+          $searchRoots = @("Output", "installer/Output")
+          $builtExe = Get-ChildItem -Path $searchRoots -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
           if (-not $builtExe) {
-            throw "No installer executable found in Output/"
+            $checkedRoots = $searchRoots -join ", "
+            throw "No installer executable found. Checked: $checkedRoots"
           }
 
           $releaseExe = "OdysseusSetup-$version.exe"

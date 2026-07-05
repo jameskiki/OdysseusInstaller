@@ -9,9 +9,19 @@ OdysseusInstaller is a Windows wizard that installs and launches the Odysseus AI
 | Requirement | Notes |
 |---|---|
 | Windows 10 / 11 (64-bit) | Required |
-| WSL2 with Ubuntu | Run `wsl --install -d Ubuntu` in an elevated terminal if not already set up |
+| WSL2 with Ubuntu | Required before running the Odysseus installer or launcher |
 | NVIDIA GPU | Optional — improves response speed significantly; CPU-only mode also works |
 | Ollama | Auto-installed by the launcher if not found |
+
+Before launching Odysseus, install WSL2 with Ubuntu by running `wsl --install -d Ubuntu` in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete the Linux username/password setup. After that, launch Odysseus.
+
+### Preinstall Checklist (WSL + Ubuntu)
+
+1. Run `wsl --install -d Ubuntu` in an elevated terminal.
+2. Reboot if prompted.
+3. Launch Ubuntu once from the Start menu or by running `wsl -d Ubuntu`.
+4. Complete Linux username/password creation.
+5. Run the Odysseus installer, then launch Odysseus.
 
 ---
 

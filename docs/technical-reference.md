@@ -41,7 +41,12 @@ The installer has five meaningful pages:
 | `GetSelectedRebuildMode` | Returns `ask`, `always`, or `never` |
 | `GetRemoteIP` | Returns trimmed remote host IP, defaulting to `127.0.0.1` |
 | `NextButtonClick` | Validates GPU warning path, remote IP, and repo ref inputs |
-| `CurStepChanged` (`ssPostInstall`) | Writes installer sentinel files and performs WSL/Ubuntu readiness checks |
+| `CurStepChanged` (`ssPostInstall`) | Writes installer sentinel files and performs WSL/Ubuntu readiness checks with prerequisite guidance |
+
+WSL behavior in the installer is readiness-check only.
+- The installer does not run `wsl --install` or bootstrap Ubuntu automatically.
+- If WSL or Ubuntu is missing, it shows a blocking guidance message telling the user to install WSL2 + Ubuntu manually, reboot if required, launch Ubuntu once to create the Linux user, and then rerun Odysseus.
+- If both are present, it shows the normal ready-to-launch message.
 
 ### Installer outputs and shortcuts
 
@@ -70,6 +75,8 @@ When host mode is selected, installer run actions add a Windows Firewall inbound
 ## 2. Launcher (`scripts/windows/Launch-Odysseus.ps1`)
 
 The launcher is the Windows-side orchestrator and includes transcript logging, WSL checks, bootstrap execution, and live runtime monitoring.
+
+The launcher assumes WSL2 + Ubuntu were already installed and initialized before launch.
 
 ### Runtime preferences and env forwarding
 

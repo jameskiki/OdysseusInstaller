@@ -81,7 +81,7 @@ function Resolve-UbuntuDistro {
 
     $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1
     if (-not $ubuntuVariant) {
-        throw "No Ubuntu WSL distribution was found. Please re-run the Odysseus installer to set it up, reboot if prompted by Windows, then relaunch Odysseus."
+        throw "No Ubuntu WSL distribution was found. Run the 'Prepare WSL for Odysseus' shortcut first. It installs Ubuntu with 'wsl --install -d Ubuntu' and guides first-run setup. Then rerun Odysseus."
     }
 
     return $ubuntuVariant
@@ -99,7 +99,7 @@ function Ensure-UbuntuInitialized {
 
     & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
     if ($LASTEXITCODE -ne 0) {
-        throw "Ubuntu initialization is incomplete. Launch 'wsl -d $WslDistro' once, finish Linux user creation, then rerun Odysseus."
+        throw "Ubuntu initialization is incomplete. Run the 'Prepare WSL for Odysseus' shortcut, complete Linux username/password creation when prompted, then rerun Odysseus."
     }
 }
 
@@ -628,7 +628,7 @@ Invoke-Step `
     -Intent "Verifying local computer configuration for WSL availability..." `
     -Action {
         if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-            throw "WSL is not installed. Please re-run the Odysseus installer to set it up, reboot if Windows requests it, then relaunch Odysseus."
+            throw "WSL2 with Ubuntu is required before Odysseus can launch. Run the 'Prepare WSL for Odysseus' shortcut first, then rerun Odysseus."
         }
     }
 
