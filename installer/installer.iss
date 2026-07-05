@@ -4,6 +4,7 @@ AppVersion=1.0.0
 DefaultDirName={autopf}\Odysseus
 DefaultGroupName=Odysseus AI
 OutputBaseFilename=Odysseus_Setup
+OutputDir=..\Output
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
