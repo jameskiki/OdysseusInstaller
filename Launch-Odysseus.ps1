@@ -187,4 +187,4 @@ Invoke-Step `
     -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop } `
     -FailMessage "Failed to start the default browser automatically. Navigate to http://localhost:7000 manually."
 
-Read-Host 'Odysseus setup finished. Press Enter to close...'
+Read-Host 'Odysseus setup finished. This launcher keeps the local stack tied to this window; closing it will stop the session. Press Enter to close...'

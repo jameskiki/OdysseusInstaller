@@ -182,23 +182,35 @@ print_step "Deploying application containers..."
 sudo docker compose up -d --build && print_ok "Containers active in background."
 
 print_step "Polling local network port 7000 to verify runtime status..."
-TIMEOUT=45; COUNT=0
-until curl -s -f http://127.0.0.1:7000 > /dev/null; do
-    printf '.'; sleep 2; COUNT=$((COUNT+2))
-    if [ $COUNT -ge $TIMEOUT ]; then echo ""; print_fail "Network handshake timeout."; fi
+TIMEOUT=90
+COUNT=0
+until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/null; do
+    COUNT=$((COUNT+2))
+    printf '.'
+    if [ $((COUNT % 10)) -eq 0 ]; then
+        printf " %ss/%ss" "$COUNT" "$TIMEOUT"
+    fi
+    if [ $COUNT -ge $TIMEOUT ]; then
+        echo ""
+        print_fail "Network handshake timeout after ${TIMEOUT}s. Check the Odysseus container logs with: sudo docker compose logs -f odysseus"
+    fi
+    sleep 2
 done
-echo ""; print_ok "Application socket online."
+echo ""
+print_ok "Application socket online after ${COUNT}s."
 
 # If this is the first deployment, extract the randomly generated administrative password
 if [ "$FIRST_BOOT" = true ]; then
     echo -e "\n\e[1;33m===================================================="
     echo "FIRST TIME INITIALIZATION COMPLETED"
     echo "===================================================="
-    echo "Your unique generated admin password is listed below:"
+    echo "Your unique generated admin password should appear in the lines below:"
     echo "----------------------------------------------------"
     sudo docker compose logs odysseus | grep -i "password" || sudo docker compose logs
     echo "----------------------------------------------------"
-    echo "Copy this password. You will need it to log in now!"
+    echo "If the password scrolls by too quickly, rerun:"
+    echo "  sudo docker compose logs odysseus | grep -i password"
+    echo "Copy that password. You will need it to log in now!"
     echo -e "====================================================\e[0m\n"
     read -p "Press [Enter] once you have copied your password to launch Edge..."
 fi
