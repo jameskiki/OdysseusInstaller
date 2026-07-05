@@ -78,13 +78,47 @@ ensure_dpkg_consistent() {
     fi
 
     echo "[INFO] Detected an incomplete dpkg state. Repairing package configuration now..."
+
+    # Use the same sequence a human operator would run for broken dependencies:
+    # 1) configure unpacked packages, 2) fix missing deps, 3) configure again.
     if ! run_with_progress "Repairing interrupted dpkg state" sudo dpkg --configure -a; then
-        echo "$audit_output"
-        print_fail "dpkg repair failed. Run 'sudo dpkg --configure -a' inside Ubuntu, then rerun Odysseus."
+        echo "[WARN] Initial 'dpkg --configure -a' did not complete cleanly. Trying apt dependency repair..."
+
+        local dep_fix_ok=0
+        for attempt in 1 2; do
+            if ! wait_for_apt_unlock; then
+                echo "[WARN] apt/dpkg lock remained busy before dependency repair attempt ${attempt}."
+            fi
+
+            if run_with_progress "Fixing package dependencies (attempt ${attempt}/2)" sudo apt-get install -f -y -qq; then
+                dep_fix_ok=1
+                break
+            fi
+
+            if [ "$attempt" -eq 1 ]; then
+                echo "[WARN] 'apt-get install -f' failed on attempt 1. Refreshing package indexes before retry..."
+                run_with_progress "Refreshing package indexes for recovery" run_apt_update || true
+                echo "[INFO] Waiting briefly before retrying dependency repair..."
+                sleep 3
+            fi
+        done
+
+        if [ "$dep_fix_ok" -ne 1 ]; then
+            echo "[WARN] Dependency repair did not complete after retries. Continuing to final dpkg pass for best-effort recovery."
+        fi
+
+        wait_for_apt_unlock || true
+        run_with_progress "Finalizing package configuration" sudo dpkg --configure -a || true
     fi
 
-    if [ -n "$(sudo dpkg --audit 2>&1 || true)" ]; then
-        print_fail "dpkg still reports unfinished package configuration after repair."
+    local post_audit
+    post_audit=$(sudo dpkg --audit 2>&1 || true)
+    if [ -n "$post_audit" ]; then
+        echo "[INFO] Package audit before repair:"
+        echo "$audit_output"
+        echo "[INFO] Package audit after repair attempts:"
+        echo "$post_audit"
+        print_fail "dpkg still reports unfinished package configuration after automatic repair. Run 'sudo dpkg --configure -a' and 'sudo apt-get install -f' inside Ubuntu, then rerun Odysseus."
     fi
 }
 

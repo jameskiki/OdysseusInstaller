@@ -409,7 +409,19 @@ Invoke-Step `
             throw "The installer payload is incomplete. Missing bootstrap script at $BootstrapScript."
         }
 
-        $linuxSourcePath = (& wsl.exe -d $WslDistro -- wslpath -a $BootstrapScript 2>$null).Trim()
+        $resolvedBootstrapPath = (Resolve-Path -Path $BootstrapScript -ErrorAction Stop).Path
+        $normalizedBootstrapPath = $resolvedBootstrapPath -replace '\\', '/'
+        $linuxSourcePath = (& wsl.exe -d $WslDistro -- wslpath -a $normalizedBootstrapPath 2>$null).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($linuxSourcePath)) {
+            # Fallback conversion in case wslpath cannot translate this Windows path format.
+            if ($resolvedBootstrapPath -match '^([A-Za-z]):\\(.*)$') {
+                $drive = $matches[1].ToLowerInvariant()
+                $suffix = ($matches[2] -replace '\\', '/')
+                $linuxSourcePath = "/mnt/$drive/$suffix"
+            }
+        }
+
         if ([string]::IsNullOrWhiteSpace($linuxSourcePath)) {
             throw "Unable to translate the installed bootstrap script path into WSL. Run 'wsl -d $WslDistro' once and retry."
         }
