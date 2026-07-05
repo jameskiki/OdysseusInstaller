@@ -12,11 +12,14 @@ SetupLogging=yes
 
 [Files]
 Source: "..\scripts\windows\Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\Prepare-WslForOdysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\wsl\run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
 Name: "{autodesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{group}\Prepare WSL for Odysseus"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Prepare-WslForOdysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{autodesktop}\Prepare WSL for Odysseus"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Prepare-WslForOdysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{group}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Audit-Odysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{autodesktop}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Audit-Odysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{autodesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Parameters: "http://{code:GetRemoteIP}:7000"; IconFilename: "{sys}\shell32.dll"; IconIndex: 14; Check: IsRemoteInstallation
@@ -244,13 +247,13 @@ begin
 
     if WslCheckCode = -1 then begin
       { Exec itself failed — PowerShell could not be launched }
-      MsgBox('Could not verify WSL readiness because PowerShell failed to launch.' + #13#10#13#10 + 'Before launching Odysseus, install WSL2 with Ubuntu by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
+      MsgBox('Could not verify WSL readiness because PowerShell failed to launch.' + #13#10#13#10 + 'Use the "Prepare WSL for Odysseus" shortcut to install/prepare WSL2 + Ubuntu, then launch Odysseus.', mbCriticalError, MB_OK);
     end
     else if WslCheckCode = 10 then begin
-      MsgBox('WSL2 with Ubuntu is required before launching Odysseus.' + #13#10#13#10 + 'Install it manually by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
+      MsgBox('WSL2 with Ubuntu is required before launching Odysseus.' + #13#10#13#10 + 'Use the "Prepare WSL for Odysseus" shortcut. It will run "wsl --install -d Ubuntu", guide reboot if needed, and help complete Ubuntu first-run setup.', mbCriticalError, MB_OK);
     end
     else if WslCheckCode = 11 then begin
-      MsgBox('WSL is installed, but no Ubuntu distribution was found.' + #13#10#13#10 + 'Install Ubuntu manually by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
+      MsgBox('WSL is installed, but no Ubuntu distribution was found.' + #13#10#13#10 + 'Use the "Prepare WSL for Odysseus" shortcut. It installs Ubuntu and guides first-run setup.', mbCriticalError, MB_OK);
     end
     else begin
       { WSL and Ubuntu already present (exit 0) }
