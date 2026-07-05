@@ -256,17 +256,19 @@ function Ensure-OllamaAvailable {
         -StdOutPath $wingetLog `
         -StdErrPath $wingetErrLog
 
-    # winget uses several success codes:
-    #  0            = installed
-    #  0x8A15002B (-1978335189) = no applicable upgrade / already installed
-    #  0x8A150109 (-1978335479) = install succeeded, reboot recommended
-    $successCodes = @(0, -1978335189, -1978335479)
-    if ($successCodes -notcontains $proc.ExitCode) {
+    # winget returns Win32/HRESULT-style codes that may surface as signed or unsigned.
+    # Normalize to UInt32 first to avoid false negatives on successful installs.
+    # 0x00000000 = installed
+    # 0x8A15002B = no applicable upgrade / already installed
+    # 0x8A150109 = install succeeded, reboot recommended
+    $exitCode = [uint32]$proc.ExitCode
+    $successCodes = @([uint32]0x00000000, [uint32]0x8A15002B, [uint32]0x8A150109)
+    if ($successCodes -notcontains $exitCode) {
         $tail = ''
         if (Test-Path $wingetLog) {
             $tail = (Get-Content $wingetLog -Tail 15 -ErrorAction SilentlyContinue) -join "`n"
         }
-        throw "winget failed to install Ollama (exit code 0x$('{0:X8}' -f $proc.ExitCode)). See $wingetLog. Last output:`n$tail"
+        throw "winget failed to install Ollama (exit code 0x$($exitCode.ToString('X8'))). See $wingetLog. Last output:`n$tail"
     }
 
     Write-Host "Ollama install completed." -ForegroundColor DarkGray

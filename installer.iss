@@ -1,7 +1,7 @@
 [Setup]
 AppName=Odysseus AI Environment
 AppVersion=1.0.0
-DefaultDirName={pf}\Odysseus
+DefaultDirName={autopf}\Odysseus
 DefaultGroupName=Odysseus AI
 OutputBaseFilename=Odysseus_Setup
 Compression=lzma
@@ -16,9 +16,10 @@ Source: "run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLoca
 Source: "Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
-Name: "{userdesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
-Name: "{group}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Audit-Odysseus.ps1' }} catch {{ Write-Error $_; Read-Host 'Audit failed. Press ENTER to close...' }}"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
-Name: "{userdesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Parameters: "http://{code:GetRemoteIP}:7000"; IconFilename: "{sys}\shell32.dll"; IconIndex: 14; Check: IsRemoteInstallation
+Name: "{autodesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{group}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Audit-Odysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{autodesktop}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Audit-Odysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{autodesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Parameters: "http://{code:GetRemoteIP}:7000"; IconFilename: "{sys}\shell32.dll"; IconIndex: 14; Check: IsRemoteInstallation
 
 [Run]
 ; Allow inbound access for shared-host mode.
@@ -30,7 +31,13 @@ var
   LocalInstallRadio: TRadioButton;
   RemoteInstallRadio: TRadioButton;
   HostCheckBox: TNewCheckBox;
+  RepoRefPage: TInputQueryWizardPage;
+  RebuildModePage: TInputOptionWizardPage;
   IPPage: TInputQueryWizardPage;
+  UninstallCleanupPrompted: Boolean;
+  RemoveLocalRuntimeData: Boolean;
+  RemoveWslWorkspaceData: Boolean;
+  RemoveResidualInstallFiles: Boolean;
 
 procedure OnDeploymentTypeChange(Sender: TObject);
 begin
@@ -92,16 +99,19 @@ begin
   RemoteInstallRadio.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
   RemoteInstallRadio.OnClick := @OnDeploymentTypeChange;
 
-  IPPage := CreateInputQueryPage(DeploymentPage.ID, 'Shared Instance Network Location', 'Specify the target IP address of the hosting workstation.', 'Please enter the IPv4 address of the computer sharing Odysseus (e.g. 192.168.1.45):');
+  RepoRefPage := CreateInputQueryPage(DeploymentPage.ID, 'Odysseus Version Selection', 'Choose which Odysseus branch or tag to use.', 'Leave this as "main" unless you were given a specific branch or release tag.');
+  RepoRefPage.Add('Git branch or tag:', False);
+  RepoRefPage.Values[0] := 'main';
+
+  RebuildModePage := CreateInputOptionPage(RepoRefPage.ID, 'Container Rebuild Preference', 'Choose how Odysseus container rebuilds should be handled on launch.', 'Recommended default: Ask each launch.', True, False);
+  RebuildModePage.Add('Ask each launch (recommended)');
+  RebuildModePage.Add('Always rebuild before launch');
+  RebuildModePage.Add('Never rebuild automatically');
+  RebuildModePage.Values[0] := True;
+
+  IPPage := CreateInputQueryPage(RebuildModePage.ID, 'Shared Instance Network Location', 'Specify the target IP address of the hosting workstation.', 'Please enter the IPv4 address of the computer sharing Odysseus (e.g. 192.168.1.45):');
   IPPage.Add('Host IP Address:', False);
   IPPage.Values[0] := '';
-end;
-
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  Result := False;
-  if (PageID = IPPage.ID) and (LocalInstallRadio.Checked) then
-    Result := True;
 end;
 
 function IsLocalInstallation: Boolean;
@@ -117,6 +127,37 @@ end;
 function IsHostSelected: Boolean;
 begin
   Result := LocalInstallRadio.Checked and HostCheckBox.Checked;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PageID = RepoRefPage.ID) and IsRemoteInstallation then
+    Result := True;
+  if (PageID = RebuildModePage.ID) and IsRemoteInstallation then
+    Result := True;
+  if (PageID = IPPage.ID) and (LocalInstallRadio.Checked) then
+    Result := True;
+end;
+
+function GetSelectedRebuildMode: string;
+begin
+  if RebuildModePage.Values[1] then
+    Result := 'always'
+  else if RebuildModePage.Values[2] then
+    Result := 'never'
+  else
+    Result := 'ask';
+end;
+
+function GetSelectedRebuildModeLabel: string;
+begin
+  if RebuildModePage.Values[1] then
+    Result := 'Always rebuild before launch'
+  else if RebuildModePage.Values[2] then
+    Result := 'Never rebuild automatically'
+  else
+    Result := 'Ask each launch';
 end;
 
 function GetRemoteIP(Param: string): string;
@@ -163,24 +204,46 @@ begin
       Result := False;
     end;
   end;
+
+  if (CurPageID = RepoRefPage.ID) and IsLocalInstallation then begin
+    if Trim(RepoRefPage.Values[0]) = '' then begin
+      MsgBox('Enter a branch or tag name (for example: main).', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var ResultCode: Integer; WslCheckCode: Integer; HostModeFile: string; RepoRefFile: string; RebuildModeFile: string;
+var
+  ResultCode: Integer;
+  WslCheckCode: Integer;
+  HostModeFile: string;
+  RepoRefFile: string;
+  RebuildModeFile: string;
+  SelectedRepoRef: string;
+  SelectedRebuildMode: string;
 begin
   if (CurStep = ssPostInstall) and (IsLocalInstallation) then begin
+    SelectedRepoRef := Trim(RepoRefPage.Values[0]);
+    if SelectedRepoRef = '' then
+      SelectedRepoRef := 'main';
+
+    SelectedRebuildMode := GetSelectedRebuildMode;
+
     RepoRefFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF';
-    if not FileExists(RepoRefFile) then
-      SaveStringToFile(RepoRefFile, 'main', False);
+    SaveStringToFile(RepoRefFile, SelectedRepoRef, False);
 
     RebuildModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE';
-    if not FileExists(RebuildModeFile) then
-      SaveStringToFile(RebuildModeFile, 'ask', False);
+    SaveStringToFile(RebuildModeFile, SelectedRebuildMode, False);
 
     if IsHostSelected then begin
       HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
-      if not FileExists(HostModeFile) then
-        SaveStringToFile(HostModeFile, 'true', False);
+      SaveStringToFile(HostModeFile, 'true', False);
+    end
+    else begin
+      HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
+      if FileExists(HostModeFile) then
+        DeleteFile(HostModeFile);
     end;
 
     { Detect WSL and Ubuntu status: exit 10 = WSL absent, exit 11 = Ubuntu absent, exit 0 = both present }
@@ -216,5 +279,67 @@ begin
       { WSL and Ubuntu already present (exit 0) }
       MsgBox('WSL and Ubuntu are ready. Use the desktop shortcut "Launch Odysseus (Local)" to start Odysseus.', mbInformation, MB_OK);
     end;
+  end;
+end;
+
+procedure RunPowerShellHidden(const Command: string);
+var
+  ResultCode: Integer;
+begin
+  Exec(
+    ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -Command "' + Command + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  LocalDataDir: string;
+begin
+  if (CurUninstallStep = usUninstall) and (not UninstallCleanupPrompted) then begin
+    UninstallCleanupPrompted := True;
+
+    RemoveLocalRuntimeData :=
+      MsgBox(
+        'Remove local Odysseus runtime data for this Windows user?' + #13#10 + #13#10 +
+        '- Logs in %LOCALAPPDATA%\Odysseus\Logs' + #13#10 +
+        '- Cached user settings/state under %LOCALAPPDATA%\Odysseus' + #13#10 +
+        '- User environment variable OLLAMA_HOST',
+        mbConfirmation, MB_YESNO) = IDYES;
+
+    RemoveWslWorkspaceData :=
+      MsgBox(
+        'Remove Odysseus files inside Ubuntu WSL as well?' + #13#10 + #13#10 +
+        '- ~/odysseus' + #13#10 +
+        '- ~/run_odysseus.sh' + #13#10 + #13#10 +
+        'This does not uninstall WSL or Ubuntu itself.',
+        mbConfirmation, MB_YESNO) = IDYES;
+
+    RemoveResidualInstallFiles :=
+      MsgBox(
+        'After uninstall finishes, remove any remaining files in the installation folder if any are left behind?',
+        mbConfirmation, MB_YESNO) = IDYES;
+
+    if RemoveLocalRuntimeData then begin
+      LocalDataDir := ExpandConstant('{localappdata}\Odysseus');
+      if DirExists(LocalDataDir) then
+        DelTree(LocalDataDir, True, True, True);
+
+      RunPowerShellHidden('[Environment]::SetEnvironmentVariable(''OLLAMA_HOST'', $null, ''User'')');
+    end;
+
+    if RemoveWslWorkspaceData then begin
+      RunPowerShellHidden(
+        '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }; ' +
+        'foreach ($d in $distros) { wsl -d $d -- bash -lc ''rm -rf ~/odysseus ~/run_odysseus.sh'' 2>$null | Out-Null }');
+    end;
+  end;
+
+  if (CurUninstallStep = usPostUninstall) and RemoveResidualInstallFiles then begin
+    if DirExists(ExpandConstant('{app}')) then
+      DelTree(ExpandConstant('{app}'), True, True, True);
+
+    RunPowerShellHidden(
+      'netsh.exe advfirewall firewall delete rule name=''Odysseus AI Network Host'' 1>$null 2>$null');
   end;
 end;
