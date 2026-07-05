@@ -254,10 +254,12 @@ function Ensure-OllamaEndpoint {
         Where-Object { $_.LocalAddress -eq '127.0.0.1' }
 
     if ($allInterfaces) {
+        Write-Host "[INFO] Ollama is already listening on all interfaces for this session." -ForegroundColor DarkGray
         return
     }
 
     if ($loopbackOnly) {
+        Write-Host "[INFO] Ollama is running but only bound to loopback; restarting it with host-wide binding." -ForegroundColor Yellow
         Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 800
     }
@@ -269,6 +271,7 @@ function Ensure-OllamaEndpoint {
         Start-Sleep -Milliseconds 500
         $probe = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
         if ($probe -and $probe.StatusCode -eq 200) {
+            Write-Host "[INFO] Ollama localhost audit passed: http://localhost:11434/api/tags is reachable." -ForegroundColor DarkGray
             Write-Progress -Activity 'Starting Ollama service' -Completed
             return
         }
@@ -276,7 +279,7 @@ function Ensure-OllamaEndpoint {
 
     Write-Progress -Activity 'Starting Ollama service' -Completed
 
-    throw "Ollama did not become reachable on http://localhost:11434. Start it manually with: `"$($ollama.Source)`" serve"
+    throw "Ollama did not become reachable on http://localhost:11434/api/tags. Start it manually with: `"$($ollama.Source)`" serve, then verify it is bound to 0.0.0.0:11434 rather than only 127.0.0.1:11434."
 }
 
 function Invoke-Step {

@@ -69,6 +69,55 @@ wait_for_apt_unlock() {
     return 1
 }
 
+ensure_dpkg_consistent() {
+    local audit_output
+    audit_output=$(sudo dpkg --audit 2>&1 || true)
+
+    if [ -z "$audit_output" ]; then
+        return 0
+    fi
+
+    echo "[INFO] Detected an incomplete dpkg state. Repairing package configuration now..."
+    if ! run_with_progress "Repairing interrupted dpkg state" sudo dpkg --configure -a; then
+        echo "$audit_output"
+        print_fail "dpkg repair failed. Run 'sudo dpkg --configure -a' inside Ubuntu, then rerun Odysseus."
+    fi
+
+    if [ -n "$(sudo dpkg --audit 2>&1 || true)" ]; then
+        print_fail "dpkg still reports unfinished package configuration after repair."
+    fi
+}
+
+audit_ollama_gateway() {
+    local gateway_ip="$1"
+    local url="http://${gateway_ip}:11434/api/tags"
+    local curl_output
+    local curl_exit
+
+    echo "[INFO] Auditing Ollama reachability at ${url}"
+    set +e
+    curl_output=$(curl -sS --connect-timeout 2 --max-time 4 -w 'HTTP_STATUS:%{http_code}' "$url" 2>&1)
+    curl_exit=$?
+    set -e
+
+    if [ "$curl_exit" -eq 0 ] && printf '%s' "$curl_output" | grep -q 'HTTP_STATUS:200'; then
+        print_ok "Ollama is reachable from WSL at ${url}."
+        return 0
+    fi
+
+    case "$curl_exit" in
+        7)
+            print_fail "Ollama is not accepting connections at ${url}. Check that Windows Ollama is running and bound to 0.0.0.0:11434."
+            ;;
+        28)
+            print_fail "Ollama timed out at ${url}. Check Windows firewall rules and WSL-to-host connectivity."
+            ;;
+        *)
+            print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking."
+            ;;
+    esac
+}
+
 run_apt_update() {
     local apt_args=(
         -o Acquire::Retries=3
@@ -189,11 +238,19 @@ sudo -v || print_fail "Sudo authentication failed."
 print_step "Waiting for package manager locks to clear..."
 wait_for_apt_unlock || print_fail "Timed out waiting for apt/dpkg lock files."
 
+print_step "Checking Ubuntu package manager health..."
+ensure_dpkg_consistent
+print_ok "Package manager is healthy."
+
 print_step "Updating Linux package indexes..."
 run_apt_update && print_ok "Repositories updated."
 
 print_step "Verifying system core utility dependencies..."
-run_with_progress "Installing core Linux utilities" sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release && print_ok "Core utilities verified."
+if run_with_progress "Installing core Linux utilities" sudo apt-get install -y -qq ca-certificates curl git gnupg lsb-release; then
+    print_ok "Core utilities verified."
+else
+    print_fail "Failed to install required Linux utilities."
+fi
 
 print_step "Validating enterprise-compliant open-source Docker Engine..."
 if ! command -v docker &> /dev/null; then
@@ -204,8 +261,12 @@ if ! command -v docker &> /dev/null; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    run_with_progress "Refreshing package indexes for Docker" sudo apt-get update -y -qq
-    run_with_progress "Installing Docker Engine packages" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    if ! run_with_progress "Refreshing package indexes for Docker" sudo apt-get update -y -qq; then
+        print_fail "Failed to refresh Docker package indexes."
+    fi
+    if ! run_with_progress "Installing Docker Engine packages" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        print_fail "Failed to install Docker Engine packages."
+    fi
     print_ok "Open-source Docker Engine deployed."
 else
     print_ok "Docker Engine verified."
@@ -312,9 +373,8 @@ configure_compose_files ".env"
 configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 
-print_step "Checking reachability of Windows-hosted Ollama from WSL..."
-wait_for_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" || print_fail "Cannot reach Ollama at http://${ODYSSEUS_WINDOWS_GATEWAY_IP}:11434 from WSL. Ensure Windows Ollama is running with OLLAMA_HOST=0.0.0.0:11434 and firewall allows port 11434."
-print_ok "Ollama endpoint reachable from WSL."
+print_step "Auditing Windows-hosted Ollama reachability from WSL..."
+audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 
 print_step "Deploying application containers..."
 run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers active in background."
