@@ -22,7 +22,7 @@ param (
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
-$WslDistro = 'Ubuntu'
+$WslDistro = $null
 
 $script:results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $script:failCount = 0
@@ -57,6 +57,21 @@ function Write-Section {
 function Invoke-Wsl {
     param([string]$Command)
     & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
+}
+
+function Get-InstalledWslDistros {
+    $distros = (& wsl.exe -l -q 2>$null)
+    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Resolve-UbuntuDistro {
+    param([string[]]$Distros)
+
+    if ($Distros -contains 'Ubuntu') {
+        return 'Ubuntu'
+    }
+
+    return ($Distros | Where-Object { $_ -match '^Ubuntu(-.*)?$' } | Select-Object -First 1)
 }
 
 function Test-HttpOk {
@@ -118,9 +133,10 @@ if (-not $hasWsl) {
 else {
     Write-Check -Name "WSL available" -Status PASS
 
-    $distros = (& wsl.exe -l -q 2>$null) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-    if ($distros -contains $WslDistro) {
-        Write-Check -Name "Ubuntu distro present" -Status PASS
+    $distros = Get-InstalledWslDistros
+    $WslDistro = Resolve-UbuntuDistro -Distros $distros
+    if (-not [string]::IsNullOrWhiteSpace($WslDistro)) {
+        Write-Check -Name "Ubuntu distro present" -Status PASS -Detail ("Using distro '{0}'" -f $WslDistro)
 
         $defaultRoute = ((Invoke-Wsl 'ip route show default 2>/dev/null') | Select-Object -First 1).Trim()
         $gatewayIp = $null
@@ -150,7 +166,7 @@ else {
 
 Write-Section "3) Environment and containers"
 
-if ($hasWsl -and ($distros -contains $WslDistro)) {
+if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
     $envLines = Invoke-Wsl 'cat ~/odysseus/.env 2>/dev/null'
     if ($null -eq $envLines -or ($envLines -join '').Trim().Length -eq 0) {
         Write-Check -Name ".env present" -Status WARN -Detail "~/odysseus/.env not found or empty."

@@ -36,7 +36,7 @@ jobs:
             throw "Tag '$tag' is not a valid version. Expected v<major>.<minor>.<patch> (optional pre-release suffix)."
           }
 
-          $issPath = Join-Path $PWD 'installer.iss'
+          $issPath = Join-Path $PWD 'installer\installer.iss'
           $issContent = Get-Content -Path $issPath -Raw
           $updatedContent = [regex]::Replace($issContent, '(?m)^AppVersion=.*$', "AppVersion=$version")
           if ($updatedContent -eq $issContent) {
@@ -49,7 +49,7 @@ jobs:
       - name: Compile Inno Setup script
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
         with:
-          path: installer.iss
+          path: installer/installer.iss
 
       - name: Resolve version and artifact paths
         id: vars

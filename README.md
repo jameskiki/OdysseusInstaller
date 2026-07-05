@@ -56,7 +56,20 @@ Use the **Launch Odysseus (Local)** shortcut on your desktop. A terminal window 
 
 ---
 
+## Repository Layout
+
+| Path | Purpose |
+|---|---|
+| `installer/installer.iss` | Inno Setup project |
+| `installer/Licenses.txt` | Installer licence text bundle |
+| `scripts/windows/` | Windows launcher and audit scripts |
+| `scripts/wsl/` | WSL bootstrap script |
+| `docs/` | Documentation and release checklists |
+
+---
+
 ## Further Reading
 
 - [Odysseus AI Workspace Guide](docs/odysseus-workspace-guide.md) — What Odysseus is and how to use it
 - [Technical Reference](docs/technical-reference.md) — How the installer works under the hood
+- [Release Doc Parity Checklist](docs/release-doc-parity-checklist.md) — Pre-release checklist to keep docs aligned with code

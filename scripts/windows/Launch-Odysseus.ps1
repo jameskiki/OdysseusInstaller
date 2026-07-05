@@ -15,6 +15,9 @@ catch {
 
 $WslDistro = $null
 $BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
+if (-not (Test-Path $BootstrapScript)) {
+    $BootstrapScript = Join-Path $PSScriptRoot '..\wsl\run_odysseus.sh'
+}
 $HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
 $RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
 $RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
@@ -553,7 +556,7 @@ function Start-OdysseusWatchdog {
 }
 
 function Invoke-Step {
-    param ([string]$Intent, [scriptblock]$Action, [string]$FailMessage)
+    param ([string]$Intent, [scriptblock]$Action)
     Write-Host "`n[INTENT] $Intent" -ForegroundColor Cyan
     try {
         & $Action
@@ -562,11 +565,9 @@ function Invoke-Step {
     catch {
         $details = $_.Exception.Message
         if ([string]::IsNullOrWhiteSpace($details)) {
-            Write-Host "[FAILED] $FailMessage" -ForegroundColor Red
+            $details = "The step failed without an explicit error message."
         }
-        else {
-            Write-Host "[FAILED] $details" -ForegroundColor Red
-        }
+        Write-Host "[FAILED] $details" -ForegroundColor Red
         if ($LogFile) {
             Write-Host "Full log: $LogFile" -ForegroundColor DarkGray
         }
@@ -585,8 +586,7 @@ Invoke-Step `
         else {
             Write-Host "[INFO] This launch will skip container rebuilds." -ForegroundColor Yellow
         }
-    } `
-    -FailMessage "Failed to apply local runtime preferences."
+    }
 
 Invoke-Step `
     -Intent "Verifying local computer configuration for WSL availability..." `
@@ -594,23 +594,20 @@ Invoke-Step `
         if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
             throw "WSL is not installed. Please re-run the Odysseus installer to set it up, reboot if Windows requests it, then relaunch Odysseus."
         }
-    } `
-    -FailMessage "WSL is not installed."
+    }
 
 Invoke-Step `
     -Intent "Selecting the Ubuntu WSL distribution for Odysseus..." `
     -Action {
         $script:WslDistro = Resolve-UbuntuDistro
         Write-Host "Using WSL distro: $script:WslDistro" -ForegroundColor DarkGray
-    } `
-    -FailMessage "Ubuntu WSL distribution lookup failed."
+    }
 
 Invoke-Step `
     -Intent "Ensuring Ubuntu initialization is complete (Linux user created)..." `
     -Action {
         Ensure-UbuntuInitialized
-    } `
-    -FailMessage "Ubuntu user initialization is incomplete."
+    }
 
 Invoke-Step `
     -Intent "Enforcing WSL systemd support for reliable Docker daemon management..." `
@@ -619,16 +616,14 @@ Invoke-Step `
         if ($env:ODYSSEUS_WSL_RESTART_REQUIRED -eq '1') {
             Write-Host "WSL systemd was enabled and WSL was restarted." -ForegroundColor DarkGray
         }
-    } `
-    -FailMessage "Failed to enforce WSL systemd support."
+    }
 
 Invoke-Step `
     -Intent "Checking local Ollama runtime for model discovery compatibility..." `
     -Action {
         Ensure-OllamaAvailable | Out-Null
         Ensure-OllamaEndpoint
-    } `
-    -FailMessage "Ollama is not available."
+    }
 
 Invoke-Step `
     -Intent "Staging the Linux bootstrap script inside the Ubuntu workspace..." `
@@ -658,8 +653,7 @@ Invoke-Step `
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to copy run_odysseus.sh into the Ubuntu home directory."
         }
-    } `
-    -FailMessage "Failed to stage the Linux bootstrap script."
+    }
 
 Invoke-Step `
     -Intent "Crossing OS boundary to trigger the Linux Environment Automator..." `
@@ -668,8 +662,7 @@ Invoke-Step `
         if ($LASTEXITCODE -ne 0) {
             throw "The Linux bootstrap script exited with code $LASTEXITCODE."
         }
-    } `
-    -FailMessage "The Linux initialization script encountered a breaking error during setup."
+    }
 
 Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
@@ -688,20 +681,17 @@ Invoke-Step `
         if (-not $reachable) {
             throw "Odysseus did not become reachable on http://localhost:7000."
         }
-    } `
-    -FailMessage "Odysseus endpoint check failed."
+    }
 
 Invoke-Step `
     -Intent "Opening the Odysseus web interface in the default browser..." `
-    -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop } `
-    -FailMessage "Failed to start the default browser automatically. Navigate to http://localhost:7000 manually."
+    -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop }
 
 Invoke-Step `
     -Intent "Starting live health watchdog (auto-heal light, 10s interval) while this window stays open..." `
     -Action {
         Start-OdysseusWatchdog -IntervalSec $WatchdogIntervalSec -Mode $WatchdogMode -RequiredServices $RequiredComposeServices
-    } `
-    -FailMessage "Watchdog loop failed unexpectedly."
+    }
 
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
 Write-Host 'Odysseus setup finished. Launcher exiting after watchdog stop request.' -ForegroundColor DarkGray

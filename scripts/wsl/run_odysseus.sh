@@ -335,19 +335,6 @@ configure_gateway_endpoints() {
     export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_host"
 }
 
-wait_for_ollama_gateway() {
-    local gateway_ip="$1"
-    # Poll for ~50s (25 attempts * 2s) to allow Ollama startup after Windows session changes.
-    for _ in $(seq 1 25); do
-        if curl -s -f "http://${gateway_ip}:11434/api/tags" > /dev/null 2>&1; then
-            return 0
-        fi
-        sleep 2
-    done
-
-    return 1
-}
-
 trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
 
 print_step "Refreshing sudo credentials for package management..."
@@ -379,7 +366,7 @@ if ! command -v docker &> /dev/null; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    if ! run_with_progress "Refreshing package indexes for Docker" sudo apt-get update -y -qq; then
+    if ! run_with_progress "Refreshing package indexes for Docker" run_apt_update; then
         print_fail "Failed to refresh Docker package indexes."
     fi
     if ! run_with_progress "Installing Docker Engine packages" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
@@ -416,7 +403,7 @@ else
 
         curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
         curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
-        run_with_progress "Refreshing package indexes for NVIDIA toolkit" sudo apt-get update -y -qq
+        run_with_progress "Refreshing package indexes for NVIDIA toolkit" run_apt_update
         run_with_progress "Installing NVIDIA container toolkit" sudo apt-get install -y nvidia-container-toolkit -qq
 
         if ! sudo nvidia-ctk runtime configure --runtime=docker > /dev/null; then

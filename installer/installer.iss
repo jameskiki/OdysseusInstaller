@@ -11,9 +11,9 @@ LicenseFile=Licenses.txt
 SetupLogging=yes
 
 [Files]
-Source: "Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
-Source: "run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
-Source: "Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\wsl\run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
 Name: "{autodesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
@@ -148,16 +148,6 @@ begin
     Result := 'never'
   else
     Result := 'ask';
-end;
-
-function GetSelectedRebuildModeLabel: string;
-begin
-  if RebuildModePage.Values[1] then
-    Result := 'Always rebuild before launch'
-  else if RebuildModePage.Values[2] then
-    Result := 'Never rebuild automatically'
-  else
-    Result := 'Ask each launch';
 end;
 
 function GetRemoteIP(Param: string): string;
