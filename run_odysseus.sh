@@ -343,6 +343,7 @@ TARGET_DIR="$HOME/odysseus"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
+ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
@@ -377,7 +378,11 @@ print_step "Auditing Windows-hosted Ollama reachability from WSL..."
 audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 
 print_step "Deploying application containers..."
-run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers active in background."
+if [ "$ODYSSEUS_REBUILD" = "1" ]; then
+    run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers rebuilt and active in background."
+else
+    run_with_progress "Starting application containers" sudo docker compose up -d && print_ok "Containers active in background (rebuild skipped)."
+fi
 
 print_step "Polling local network port 7000 to verify runtime status..."
 TIMEOUT=90

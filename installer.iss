@@ -13,9 +13,11 @@ SetupLogging=yes
 [Files]
 Source: "Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
 Name: "{userdesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{group}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Audit-Odysseus.ps1' }} catch {{ Write-Error $_; Read-Host 'Audit failed. Press ENTER to close...' }}"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{userdesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Parameters: "http://{code:GetRemoteIP}:7000"; IconFilename: "{sys}\shell32.dll"; IconIndex: 14; Check: IsRemoteInstallation
 
 [Run]
@@ -164,9 +166,17 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var ResultCode: Integer; WslCheckCode: Integer; HostModeFile: string;
+var ResultCode: Integer; WslCheckCode: Integer; HostModeFile: string; RepoRefFile: string; RebuildModeFile: string;
 begin
   if (CurStep = ssPostInstall) and (IsLocalInstallation) then begin
+    RepoRefFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF';
+    if not FileExists(RepoRefFile) then
+      SaveStringToFile(RepoRefFile, 'main', False);
+
+    RebuildModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE';
+    if not FileExists(RebuildModeFile) then
+      SaveStringToFile(RebuildModeFile, 'ask', False);
+
     if IsHostSelected then begin
       HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
       if not FileExists(HostModeFile) then
