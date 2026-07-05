@@ -122,12 +122,17 @@ else {
     if ($distros -contains $WslDistro) {
         Write-Check -Name "Ubuntu distro present" -Status PASS
 
-        $gatewayIp = (Invoke-Wsl 'ip route show default 2>/dev/null | awk ''/default via/ {print $3; exit}''').Trim()
+        $defaultRoute = ((Invoke-Wsl 'ip route show default 2>/dev/null') | Select-Object -First 1).Trim()
+        $gatewayIp = $null
+        if ($defaultRoute -match 'default\s+via\s+(\S+)') {
+            $gatewayIp = $matches[1]
+        }
+
         if ([string]::IsNullOrWhiteSpace($gatewayIp)) {
             Write-Check -Name "WSL host gateway" -Status WARN -Detail "Could not resolve default gateway from WSL."
         }
         else {
-            Write-Check -Name "WSL host gateway" -Status PASS -Detail $gatewayIp
+            Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
             $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
             if (($reach -join '').Trim() -eq 'OK') {
@@ -165,13 +170,21 @@ if ($hasWsl -and ($distros -contains $WslDistro)) {
         }
     }
 
-    $dockerRunning = ((Invoke-Wsl 'if sudo docker info >/dev/null 2>&1; then echo RUNNING; else echo STOPPED; fi') -join '').Trim()
+    # Keep this check side-effect free: do not call docker CLI here because it can
+    # trigger socket activation and start dockerd on some systems.
+    $dockerRunning = ((Invoke-Wsl 'if pgrep -x dockerd >/dev/null 2>&1; then echo RUNNING; else echo STOPPED; fi') -join '').Trim()
     if ($dockerRunning -eq 'RUNNING') {
         Write-Check -Name "Docker daemon (WSL)" -Status PASS
 
-        $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; sudo docker compose ps -a 2>/dev/null'
-        $rows = $composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' }
-        if ($rows) {
+        $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; docker compose ps -a 2>/dev/null'
+        if (-not $composePs -or ($composePs -join '').Trim().Length -eq 0) {
+            # Fallback for environments where docker requires sudo. Use -n to avoid
+            # interactive password prompts during health checks.
+            $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; sudo -n docker compose ps -a 2>/dev/null'
+        }
+
+        $rows = @($composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
+        if ($rows.Count -gt 0) {
             foreach ($row in $rows) {
                 $container = ($row.Trim() -split '\s+')[0]
                 if ($row -match '\bExit') {
@@ -189,11 +202,11 @@ if ($hasWsl -and ($distros -contains $WslDistro)) {
             }
         }
         else {
-            Write-Check -Name "Odysseus containers" -Status WARN -Detail "No compose containers listed under ~/odysseus."
+            Write-Check -Name "Odysseus containers" -Status WARN -Detail "Container list unavailable (docker permissions or no compose services under ~/odysseus)."
         }
     }
     else {
-        Write-Check -Name "Docker daemon (WSL)" -Status FAIL -Detail "sudo docker info failed in WSL."
+        Write-Check -Name "Docker daemon (WSL)" -Status FAIL -Detail "dockerd process is not running in WSL."
     }
 }
 else {

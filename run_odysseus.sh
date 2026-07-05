@@ -123,8 +123,8 @@ ensure_dpkg_consistent() {
 }
 
 audit_ollama_gateway() {
-    local gateway_ip="$1"
-    local url="http://${gateway_ip}:11434/api/tags"
+    local gateway_host="$1"
+    local url="http://${gateway_host}:11434/api/tags"
     local curl_output
     local curl_exit
 
@@ -150,6 +150,70 @@ audit_ollama_gateway() {
             print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking."
             ;;
     esac
+}
+
+is_ollama_reachable() {
+    local host="$1"
+    local url="http://${host}:11434/api/tags"
+
+    curl -sS --connect-timeout 2 --max-time 4 -f "$url" > /dev/null 2>&1
+}
+
+resolve_windows_ollama_host() {
+    local candidate
+    local candidates=()
+    local fallback=""
+
+    # Allow advanced users to force a known-good host endpoint explicitly.
+    if [ -n "${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}" ]; then
+        candidates+=("${ODYSSEUS_WINDOWS_HOST_OVERRIDE}")
+    fi
+
+    # WSL's synthetic DNS server can be the right bridge on some setups.
+    candidate=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
+    if [ -n "$candidate" ]; then
+        candidates+=("$candidate")
+        fallback="$candidate"
+    fi
+
+    # The default route gateway often maps to the Windows host in WSL NAT mode.
+    candidate=$(ip route show default 2> /dev/null | awk '{print $3; exit}')
+    if [ -n "$candidate" ]; then
+        candidates+=("$candidate")
+        if [ -z "$fallback" ]; then
+            fallback="$candidate"
+        fi
+    fi
+
+    # host.docker.internal can work across Docker/WSL setups and keeps .env portable.
+    candidates+=("host.docker.internal")
+    if [ -z "$fallback" ]; then
+        fallback="host.docker.internal"
+    fi
+
+    local attempted=""
+    for candidate in "${candidates[@]}"; do
+        if [ -z "$candidate" ]; then
+            continue
+        fi
+
+        case "|${attempted}|" in
+            *"|${candidate}|"*)
+                continue
+                ;;
+        esac
+        attempted="${attempted}|${candidate}"
+
+        if is_ollama_reachable "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    # No live endpoint yet; return best guess so downstream checks can emit
+    # actionable failure messages without blocking env configuration.
+    echo "$fallback"
+    return 0
 }
 
 run_apt_update() {
@@ -200,6 +264,26 @@ ensure_docker_running() {
     wait_for_docker
 }
 
+ensure_docker_group_access() {
+    local linux_user
+    linux_user=$(id -un)
+
+    sudo groupadd -f docker
+
+    if id -nG "$linux_user" | tr ' ' '\n' | grep -qx docker; then
+        print_ok "Linux user '$linux_user' already has docker-group access."
+        return 0
+    fi
+
+    if sudo usermod -aG docker "$linux_user"; then
+        print_ok "Added Linux user '$linux_user' to docker group."
+        echo "[INFO] Docker group membership applies to new shells. If you still see docker permission issues, restart WSL (wsl --shutdown) and relaunch Odysseus."
+        return 0
+    fi
+
+    print_fail "Failed to grant docker-group access to Linux user '$linux_user'."
+}
+
 upsert_env_key() {
     local key="$1"
     local value="$2"
@@ -235,20 +319,20 @@ HOSTEOF
 
 configure_gateway_endpoints() {
     local env_file="$1"
-    local gateway_ip
+    local gateway_host
 
-    gateway_ip=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
-    if [ -z "$gateway_ip" ]; then
-        print_fail "Unable to detect Windows host gateway IP from /etc/resolv.conf. Verify WSL networking is active and rerun."
+    gateway_host=$(resolve_windows_ollama_host)
+    if [ -z "$gateway_host" ]; then
+        print_fail "Unable to resolve a Windows host endpoint for Ollama. Verify WSL networking is active and rerun."
         return 1
     fi
 
-    upsert_env_key "LLM_HOST" "$gateway_ip" "$env_file"
-    upsert_env_key "LLM_HOSTS" "$gateway_ip" "$env_file"
-    upsert_env_key "OLLAMA_BASE_URL" "http://${gateway_ip}:11434/v1" "$env_file"
-    upsert_env_key "EMBEDDING_URL" "http://${gateway_ip}:11434/v1/embeddings" "$env_file"
+    upsert_env_key "LLM_HOST" "$gateway_host" "$env_file"
+    upsert_env_key "LLM_HOSTS" "$gateway_host" "$env_file"
+    upsert_env_key "OLLAMA_BASE_URL" "http://${gateway_host}:11434/v1" "$env_file"
+    upsert_env_key "EMBEDDING_URL" "http://${gateway_host}:11434/v1/embeddings" "$env_file"
 
-    export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_ip"
+    export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_host"
 }
 
 wait_for_ollama_gateway() {
@@ -312,6 +396,9 @@ if ensure_docker_running; then
 else
     print_fail "Docker daemon could not be started. Verify Docker Desktop/Engine state and rerun."
 fi
+
+print_step "Aligning Linux user permissions for non-root Docker usage..."
+ensure_docker_group_access
 
 print_step "Validating graphics card passthrough configurations..."
 if ! command -v nvidia-smi &> /dev/null; then

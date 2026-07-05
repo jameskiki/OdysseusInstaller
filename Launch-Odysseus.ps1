@@ -46,7 +46,7 @@ switch ($rebuildMode) {
     }
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD')
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -60,6 +60,9 @@ else {
     $env:WSLENV = ($existing -join ':')
 }
 $env:ODYSSEUS_WSL_RESTART_REQUIRED = '0'
+$WatchdogMode = 'auto-heal-light'
+$WatchdogIntervalSec = 10
+$RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
 
 function Get-InstalledWslDistros {
     $distros = & wsl.exe -l -q 2>$null
@@ -324,6 +327,231 @@ function Ensure-OllamaEndpoint {
     throw "Ollama did not become reachable on http://localhost:11434/api/tags. Start it manually with: `"$($ollama.Source)`" serve, then verify it is bound to 0.0.0.0:11434 rather than only 127.0.0.1:11434."
 }
 
+function Invoke-WslCommand {
+    param([string]$Command)
+
+    $output = & wsl.exe -d $WslDistro -- bash -lc $Command 2>$null
+    return [PSCustomObject]@{
+        ExitCode = $LASTEXITCODE
+        Output = @($output)
+    }
+}
+
+function Test-HttpEndpoint {
+    param(
+        [string]$Uri,
+        [int]$TimeoutSec = 3
+    )
+
+    try {
+        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-WslGatewayIp {
+    $route = Invoke-WslCommand -Command "ip route show default 2>/dev/null | head -n 1"
+    if ($route.ExitCode -ne 0) {
+        return $null
+    }
+
+    $routeLine = ($route.Output | Select-Object -First 1).Trim()
+    if ($routeLine -match 'default\s+via\s+(\S+)') {
+        return $matches[1]
+    }
+
+    return $null
+}
+
+function Get-ComposeServiceStates {
+    $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
+    if ($result.ExitCode -ne 0) {
+        # Fallback for environments that still require sudo, but keep it non-interactive.
+        $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
+    }
+    if ($result.ExitCode -ne 0) {
+        return @{}
+    }
+
+    $states = @{}
+    foreach ($line in $result.Output) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+        $parts = $line -split '\|', 3
+        if ($parts.Count -lt 2) { continue }
+
+        $service = $parts[0].Trim()
+        $state = $parts[1].Trim().ToLowerInvariant()
+        $health = if ($parts.Count -ge 3) { $parts[2].Trim().ToLowerInvariant() } else { '' }
+
+        if (-not [string]::IsNullOrWhiteSpace($service)) {
+            $states[$service] = [PSCustomObject]@{
+                State = $state
+                Health = $health
+            }
+        }
+    }
+
+    return $states
+}
+
+function Test-OdysseusRuntimeHealth {
+    param([string[]]$RequiredServices)
+
+    $issues = [System.Collections.Generic.List[string]]::new()
+
+    $wslCheck = Invoke-WslCommand -Command "id -un >/dev/null 2>&1"
+    if ($wslCheck.ExitCode -ne 0) {
+        $issues.Add('WSL command execution failed.')
+    }
+
+    if (-not (Test-HttpEndpoint -Uri 'http://localhost:11434/api/tags' -TimeoutSec 2)) {
+        $issues.Add('Windows Ollama endpoint is down (http://localhost:11434/api/tags).')
+    }
+
+    $gatewayIp = Get-WslGatewayIp
+    if ([string]::IsNullOrWhiteSpace($gatewayIp)) {
+        $issues.Add('WSL default gateway could not be resolved.')
+    }
+    else {
+        $gatewayReach = Invoke-WslCommand -Command "curl -sf --max-time 3 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1"
+        if ($gatewayReach.ExitCode -ne 0) {
+            $issues.Add("WSL cannot reach Ollama via gateway ${gatewayIp}:11434.")
+        }
+    }
+
+    $dockerdCheck = Invoke-WslCommand -Command "pgrep -x dockerd >/dev/null 2>&1"
+    if ($dockerdCheck.ExitCode -ne 0) {
+        $issues.Add('dockerd is not running in WSL.')
+    }
+
+    $serviceStates = Get-ComposeServiceStates
+    if ($serviceStates.Count -eq 0) {
+        $issues.Add('Compose service state cannot be read (sudo prompt, permissions, or missing ~/odysseus).')
+    }
+    else {
+        foreach ($service in $RequiredServices) {
+            if (-not $serviceStates.ContainsKey($service)) {
+                $issues.Add("Required service '$service' is missing from docker compose ps output.")
+                continue
+            }
+
+            $state = $serviceStates[$service].State
+            $health = $serviceStates[$service].Health
+            if ($state -ne 'running') {
+                $issues.Add("Required service '$service' is not running (state=$state).")
+            }
+            if (-not [string]::IsNullOrWhiteSpace($health) -and $health -ne 'healthy') {
+                $issues.Add("Required service '$service' reports health '$health'.")
+            }
+        }
+    }
+
+    if (-not (Test-HttpEndpoint -Uri 'http://localhost:7000' -TimeoutSec 3)) {
+        $issues.Add('Odysseus app endpoint is down (http://localhost:7000).')
+    }
+
+    return [PSCustomObject]@{
+        Healthy = ($issues.Count -eq 0)
+        Issues = @($issues)
+        Summary = if ($issues.Count -eq 0) { 'HEALTHY' } else { ($issues -join ' ') }
+    }
+}
+
+function Invoke-WatchdogAutoHealLight {
+    Write-Host "[WATCHDOG][WARN] Runtime drift detected. Attempting lightweight recovery with 'docker compose up -d'." -ForegroundColor Yellow
+    $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose up -d"
+    if ($heal.ExitCode -ne 0) {
+        # Fallback without password prompt when sudo is required.
+        $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose up -d"
+    }
+    return ($heal.ExitCode -eq 0)
+}
+
+function Test-EnterPressed {
+    try {
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            return ($key.Key -eq [ConsoleKey]::Enter)
+        }
+    }
+    catch {
+        return $false
+    }
+
+    return $false
+}
+
+function Start-OdysseusWatchdog {
+    param(
+        [int]$IntervalSec,
+        [string]$Mode,
+        [string[]]$RequiredServices
+    )
+
+    Write-Host "[WATCHDOG] Mode: $Mode | Interval: ${IntervalSec}s" -ForegroundColor DarkGray
+    Write-Host "[WATCHDOG] Monitoring: WSL, Ollama (Windows+WSL gateway), dockerd, compose services ($($RequiredServices -join ', ')), app endpoint." -ForegroundColor DarkGray
+    Write-Host "[WATCHDOG] Press Enter at any time to close this launcher window." -ForegroundColor DarkGray
+
+    $lastStatus = ''
+    $healedCurrentIncident = $false
+    $lastRun = [datetime]::MinValue
+
+    while ($true) {
+        if (Test-EnterPressed) {
+            break
+        }
+
+        if (((Get-Date) - $lastRun).TotalSeconds -lt $IntervalSec) {
+            Start-Sleep -Milliseconds 300
+            continue
+        }
+
+        $health = Test-OdysseusRuntimeHealth -RequiredServices $RequiredServices
+
+        if ($health.Healthy) {
+            if ($lastStatus -ne 'HEALTHY') {
+                Write-Host "[WATCHDOG][PASS] Runtime health is stable." -ForegroundColor Green
+            }
+            $lastStatus = 'HEALTHY'
+            $healedCurrentIncident = $false
+            $lastRun = Get-Date
+            continue
+        }
+
+        $statusText = $health.Summary
+        if ($lastStatus -ne $statusText) {
+            Write-Host "[WATCHDOG][FAIL] $statusText" -ForegroundColor Red
+            $lastStatus = $statusText
+        }
+
+        if ($Mode -eq 'auto-heal-light' -and -not $healedCurrentIncident) {
+            $healedCurrentIncident = $true
+            if (Invoke-WatchdogAutoHealLight) {
+                Start-Sleep -Seconds 4
+                $postHeal = Test-OdysseusRuntimeHealth -RequiredServices $RequiredServices
+                if ($postHeal.Healthy) {
+                    Write-Host "[WATCHDOG][PASS] Lightweight recovery succeeded." -ForegroundColor Green
+                    $lastStatus = 'HEALTHY'
+                    $healedCurrentIncident = $false
+                }
+                else {
+                    Write-Host "[WATCHDOG][WARN] Lightweight recovery attempted, but runtime is still degraded." -ForegroundColor Yellow
+                    $lastStatus = $postHeal.Summary
+                }
+            }
+            else {
+                Write-Host "[WATCHDOG][WARN] Lightweight recovery command failed. Manual inspection required." -ForegroundColor Yellow
+            }
+        }
+
+        $lastRun = Get-Date
+    }
+}
+
 function Invoke-Step {
     param ([string]$Intent, [scriptblock]$Action, [string]$FailMessage)
     Write-Host "`n[INTENT] $Intent" -ForegroundColor Cyan
@@ -468,5 +696,12 @@ Invoke-Step `
     -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop } `
     -FailMessage "Failed to start the default browser automatically. Navigate to http://localhost:7000 manually."
 
+Invoke-Step `
+    -Intent "Starting live health watchdog (auto-heal light, 10s interval) while this window stays open..." `
+    -Action {
+        Start-OdysseusWatchdog -IntervalSec $WatchdogIntervalSec -Mode $WatchdogMode -RequiredServices $RequiredComposeServices
+    } `
+    -FailMessage "Watchdog loop failed unexpectedly."
+
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-Read-Host 'Odysseus setup finished. This launcher keeps the local stack tied to this window; closing it will stop the session. Press Enter to close...'
+Write-Host 'Odysseus setup finished. Launcher exiting after watchdog stop request.' -ForegroundColor DarkGray
