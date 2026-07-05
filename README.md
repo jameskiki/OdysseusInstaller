@@ -54,6 +54,8 @@ Use the **Launch Odysseus (Local)** shortcut on your desktop. A terminal window 
 | Local or host machine | `http://localhost:7000` |
 | Connecting remotely | `http://<host-ip>:7000` |
 
+If launch fails during the Ollama reachability audit, run the **Odysseus Health Audit** shortcut. The audit now reports which WSL host candidates were tested for Ollama (`gateway`, `host.docker.internal`, or an explicit override), which helps diagnose Windows 10 host-routing edge cases quickly.
+
 ---
 
 ## Repository Layout

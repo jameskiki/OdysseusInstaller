@@ -299,7 +299,7 @@ function Ensure-OllamaEndpoint {
     $allInterfaces = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
     $loopbackOnly = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalAddress -eq '127.0.0.1' }
+        Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') }
 
     if ($allInterfaces) {
         Write-Host "[INFO] Ollama is already listening on all interfaces for this session." -ForegroundColor DarkGray
@@ -328,6 +328,42 @@ function Ensure-OllamaEndpoint {
     Write-Progress -Activity 'Starting Ollama service' -Completed
 
     throw "Ollama did not become reachable on http://localhost:11434/api/tags. Start it manually with: `"$($ollama.Source)`" serve, then verify it is bound to 0.0.0.0:11434 rather than only 127.0.0.1:11434."
+}
+
+function Resolve-WindowsOllamaHostOverride {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
+        $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE.Trim())
+    }
+
+    $resolv = Invoke-WslCommand -Command "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf"
+    if ($resolv.ExitCode -eq 0) {
+        $nameServer = ($resolv.Output | Select-Object -First 1).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($nameServer)) {
+            $candidates.Add($nameServer)
+        }
+    }
+
+    $gateway = Get-WslGatewayIp
+    if (-not [string]::IsNullOrWhiteSpace($gateway)) {
+        $candidates.Add($gateway)
+    }
+
+    $candidates.Add('host.docker.internal')
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+
+        if (Test-HttpEndpoint -Uri "http://$candidate`:11434/api/tags" -TimeoutSec 2) {
+            return $candidate
+        }
+    }
+
+    return $null
 }
 
 function Invoke-WslCommand {
@@ -623,6 +659,16 @@ Invoke-Step `
     -Action {
         Ensure-OllamaAvailable | Out-Null
         Ensure-OllamaEndpoint
+
+        $windowsHostOverride = Resolve-WindowsOllamaHostOverride
+        if (-not [string]::IsNullOrWhiteSpace($windowsHostOverride)) {
+            $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE = $windowsHostOverride
+            Write-Host "[INFO] Using Windows host override for WSL Ollama routing: $windowsHostOverride" -ForegroundColor DarkGray
+        }
+        else {
+            Remove-Item Env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -ErrorAction SilentlyContinue
+            Write-Host "[INFO] No deterministic Windows host override resolved; WSL bootstrap will probe candidates directly." -ForegroundColor DarkGray
+        }
     }
 
 Invoke-Step `

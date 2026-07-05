@@ -125,13 +125,13 @@ This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odys
 
 ### Networking and endpoint configuration
 
-- `resolve_windows_ollama_host`: discovers best Windows host endpoint from override, resolv.conf nameserver, default route gateway, and `host.docker.internal`.
+- `resolve_windows_ollama_host`: tests Windows host candidates in order (explicit override, resolv.conf nameserver, default route gateway, `host.docker.internal`) and selects the first reachable Ollama endpoint.
 - `configure_gateway_endpoints`: updates `.env` keys via `upsert_env_key`:
   - `LLM_HOST`
   - `LLM_HOSTS`
   - `OLLAMA_BASE_URL`
   - `EMBEDDING_URL`
-- `audit_ollama_gateway`: verifies WSL can reach Windows-hosted Ollama.
+- `audit_ollama_gateway`: verifies WSL can reach Windows-hosted Ollama and prints candidate diagnostics when the check fails.
 
 ### Compose profile selection
 

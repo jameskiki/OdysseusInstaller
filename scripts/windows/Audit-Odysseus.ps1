@@ -112,13 +112,13 @@ else {
 
 $listeners = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue
 $allIface = $listeners | Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
-$loopbackOnly = $listeners | Where-Object { $_.LocalAddress -eq '127.0.0.1' }
+$loopbackOnly = $listeners | Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') }
 
 if ($allIface) {
     Write-Check -Name "Ollama bind scope" -Status PASS -Detail "Listening on all interfaces"
 }
 elseif ($loopbackOnly) {
-    Write-Check -Name "Ollama bind scope" -Status FAIL -Detail "Bound to loopback only (127.0.0.1)."
+    Write-Check -Name "Ollama bind scope" -Status FAIL -Detail "Bound to loopback only (127.0.0.1/::1)."
 }
 else {
     Write-Check -Name "Ollama bind scope" -Status WARN -Detail "No listener detected on port 11434."
@@ -150,12 +150,34 @@ else {
         else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-            $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
-            if (($reach -join '').Trim() -eq 'OK') {
-                Write-Check -Name "Ollama reachable from WSL" -Status PASS
+            $candidates = [System.Collections.Generic.List[string]]::new()
+            if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
+                $candidates.Add($gatewayIp)
+            }
+            $candidates.Add('host.docker.internal')
+
+            $reachableVia = $null
+            $attempted = [System.Collections.Generic.List[string]]::new()
+            $seen = @{}
+            foreach ($candidate in $candidates) {
+                if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                if ($seen.ContainsKey($candidate)) { continue }
+                $seen[$candidate] = $true
+                $attempted.Add($candidate)
+
+                $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${candidate}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
+                if (($reach -join '').Trim() -eq 'OK') {
+                    $reachableVia = $candidate
+                    break
+                }
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
+                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reachableVia)
             }
             else {
-                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl http://{0}:11434/api/tags failed from WSL." -f $gatewayIp)
+                $attemptedText = if ($attempted.Count -gt 0) { $attempted -join ', ' } else { 'none' }
+                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}." -f $attemptedText)
             }
         }
     }

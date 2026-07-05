@@ -124,11 +124,15 @@ ensure_dpkg_consistent() {
 
 audit_ollama_gateway() {
     local gateway_host="$1"
+    local candidates="$2"
     local url="http://${gateway_host}:11434/api/tags"
     local curl_output
     local curl_exit
 
     echo "[INFO] Auditing Ollama reachability at ${url}"
+    if [ -n "$candidates" ]; then
+        echo "[INFO] Host candidates tested: ${candidates}"
+    fi
     set +e
     curl_output=$(curl -sS --connect-timeout 2 --max-time 4 -w 'HTTP_STATUS:%{http_code}' "$url" 2>&1)
     curl_exit=$?
@@ -141,13 +145,13 @@ audit_ollama_gateway() {
 
     case "$curl_exit" in
         7)
-            print_fail "Ollama is not accepting connections at ${url}. Check that Windows Ollama is running and bound to 0.0.0.0:11434."
+            print_fail "Ollama is not accepting connections at ${url}. Check that Windows Ollama is running and bound to 0.0.0.0:11434. Candidates: ${candidates:-none}."
             ;;
         28)
-            print_fail "Ollama timed out at ${url}. Check Windows firewall rules and WSL-to-host connectivity."
+            print_fail "Ollama timed out at ${url}. Check Windows firewall rules and WSL-to-host connectivity. Candidates: ${candidates:-none}."
             ;;
         *)
-            print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking."
+            print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking. Candidates: ${candidates:-none}."
             ;;
     esac
 }
@@ -162,7 +166,8 @@ is_ollama_reachable() {
 resolve_windows_ollama_host() {
     local candidate
     local candidates=()
-    local fallback=""
+    local attempted=""
+    local attempted_csv=""
 
     # Allow advanced users to force a known-good host endpoint explicitly.
     if [ -n "${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}" ]; then
@@ -173,25 +178,17 @@ resolve_windows_ollama_host() {
     candidate=$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf)
     if [ -n "$candidate" ]; then
         candidates+=("$candidate")
-        fallback="$candidate"
     fi
 
     # The default route gateway often maps to the Windows host in WSL NAT mode.
     candidate=$(ip route show default 2> /dev/null | awk '{print $3; exit}')
     if [ -n "$candidate" ]; then
         candidates+=("$candidate")
-        if [ -z "$fallback" ]; then
-            fallback="$candidate"
-        fi
     fi
 
     # host.docker.internal can work across Docker/WSL setups and keeps .env portable.
     candidates+=("host.docker.internal")
-    if [ -z "$fallback" ]; then
-        fallback="host.docker.internal"
-    fi
 
-    local attempted=""
     for candidate in "${candidates[@]}"; do
         if [ -z "$candidate" ]; then
             continue
@@ -203,17 +200,22 @@ resolve_windows_ollama_host() {
                 ;;
         esac
         attempted="${attempted}|${candidate}"
+        if [ -z "$attempted_csv" ]; then
+            attempted_csv="$candidate"
+        else
+            attempted_csv="${attempted_csv}, ${candidate}"
+        fi
 
         if is_ollama_reachable "$candidate"; then
-            echo "$candidate"
+            ODYSSEUS_WINDOWS_GATEWAY_IP="$candidate"
+            ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="$attempted_csv"
             return 0
         fi
     done
 
-    # No live endpoint yet; return best guess so downstream checks can emit
-    # actionable failure messages without blocking env configuration.
-    echo "$fallback"
-    return 0
+    ODYSSEUS_WINDOWS_GATEWAY_IP=""
+    ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="$attempted_csv"
+    return 1
 }
 
 run_apt_update() {
@@ -321,9 +323,14 @@ configure_gateway_endpoints() {
     local env_file="$1"
     local gateway_host
 
-    gateway_host=$(resolve_windows_ollama_host)
+    if ! resolve_windows_ollama_host; then
+        print_fail "Unable to resolve a reachable Windows host endpoint for Ollama. Candidates tested: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}. Verify WSL networking and Windows Ollama binding, then rerun."
+        return 1
+    fi
+
+    gateway_host="$ODYSSEUS_WINDOWS_GATEWAY_IP"
     if [ -z "$gateway_host" ]; then
-        print_fail "Unable to resolve a Windows host endpoint for Ollama. Verify WSL networking is active and rerun."
+        print_fail "Resolved an empty Windows host endpoint for Ollama. Candidates tested: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}."
         return 1
     fi
 
@@ -333,6 +340,7 @@ configure_gateway_endpoints() {
     upsert_env_key "EMBEDDING_URL" "http://${gateway_host}:11434/v1/embeddings" "$env_file"
 
     export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_host"
+    export ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED
 }
 
 trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
@@ -483,7 +491,7 @@ configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Auditing Windows-hosted Ollama reachability from WSL..."
-audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
+audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" "${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-$ODYSSEUS_WINDOWS_GATEWAY_IP}"
 
 print_step "Deploying application containers..."
 if [ "$ODYSSEUS_REBUILD" = "1" ]; then
