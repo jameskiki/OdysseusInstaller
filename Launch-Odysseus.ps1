@@ -16,9 +16,49 @@ catch {
 $WslDistro = $null
 $BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
 $HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
+$RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
+$RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
 $IsHostMode = Test-Path $HostModeFile
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
-$env:WSLENV = if ([string]::IsNullOrEmpty($env:WSLENV)) { 'ODYSSEUS_HOST_MODE' } else { "$($env:WSLENV):ODYSSEUS_HOST_MODE" }
+$repoRef = 'main'
+if (Test-Path $RepoRefFile) {
+    $rawRepoRef = (Get-Content -Path $RepoRefFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($rawRepoRef)) {
+        $repoRef = $rawRepoRef
+    }
+}
+
+$rebuildMode = 'ask'
+if (Test-Path $RebuildModeFile) {
+    $rawRebuildMode = (Get-Content -Path $RebuildModeFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim().ToLowerInvariant()
+    if ($rawRebuildMode -in @('ask', 'always', 'never')) {
+        $rebuildMode = $rawRebuildMode
+    }
+}
+
+$env:ODYSSEUS_REPO_REF = $repoRef
+switch ($rebuildMode) {
+    'always' { $env:ODYSSEUS_REBUILD = '1' }
+    'never' { $env:ODYSSEUS_REBUILD = '0' }
+    default {
+        $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
+        $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+    }
+}
+
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD')
+if ([string]::IsNullOrEmpty($env:WSLENV)) {
+    $env:WSLENV = ($wslEnvVars -join ':')
+}
+else {
+    $existing = @($env:WSLENV -split ':')
+    foreach ($name in $wslEnvVars) {
+        if ($existing -notcontains $name) {
+            $existing += $name
+        }
+    }
+    $env:WSLENV = ($existing -join ':')
+}
 $env:ODYSSEUS_WSL_RESTART_REQUIRED = '0'
 
 function Get-InstalledWslDistros {
@@ -305,6 +345,18 @@ function Invoke-Step {
         exit 1
     }
 }
+
+Invoke-Step `
+    -Intent "Applying local runtime preferences (branch/ref '$repoRef', rebuild mode '$rebuildMode')..." `
+    -Action {
+        if ($env:ODYSSEUS_REBUILD -eq '1') {
+            Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "[INFO] This launch will skip container rebuilds." -ForegroundColor Yellow
+        }
+    } `
+    -FailMessage "Failed to apply local runtime preferences."
 
 Invoke-Step `
     -Intent "Verifying local computer configuration for WSL availability..." `
