@@ -205,7 +205,6 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ResultCode: Integer;
   WslCheckCode: Integer;
   HostModeFile: string;
   RepoRefFile: string;
@@ -236,7 +235,7 @@ begin
         DeleteFile(HostModeFile);
     end;
 
-    { Detect WSL and Ubuntu status: exit 10 = WSL absent, exit 11 = Ubuntu absent, exit 0 = both present }
+    { Readiness check only: exit 10 = WSL absent, exit 11 = Ubuntu absent, exit 0 = both present }
     if not Exec(
       ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
       '-NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) { exit 10 }; [Console]::OutputEncoding = [System.Text.Encoding]::Unicode; $distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ }; if (-not ($distros | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' })) { exit 11 }"',
@@ -245,25 +244,13 @@ begin
 
     if WslCheckCode = -1 then begin
       { Exec itself failed — PowerShell could not be launched }
-      MsgBox('Could not verify WSL status (PowerShell failed to launch). If WSL or Ubuntu is not yet set up, re-run the installer. Otherwise use the desktop shortcut "Launch Odysseus (Local)" to start Odysseus.', mbError, MB_OK);
+      MsgBox('Could not verify WSL readiness because PowerShell failed to launch.' + #13#10#13#10 + 'Before launching Odysseus, install WSL2 with Ubuntu by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
     end
     else if WslCheckCode = 10 then begin
-      { WSL feature not installed — run wsl --install which enables the feature and installs Ubuntu }
-      MsgBox('WSL is not yet enabled on this machine. A terminal window will now open to install WSL and Ubuntu. Please wait for it to finish, then reboot if Windows requests it.', mbInformation, MB_OK);
-      Exec(
-        ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
-        '-NoProfile -ExecutionPolicy Bypass -Command "wsl --install -d Ubuntu; Write-Host ''''; Write-Host ''Done. Press Enter to close...''; Read-Host"',
-        '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
-      MsgBox('WSL and Ubuntu installation has run.' + #13#10#13#10 + 'If Windows prompted you to reboot, please do so now.' + #13#10 + 'After rebooting, use the desktop shortcut to launch Odysseus. If Ubuntu prompts you to create a Linux username and password on first run, complete that step and relaunch.', mbInformation, MB_OK);
+      MsgBox('WSL2 with Ubuntu is required before launching Odysseus.' + #13#10#13#10 + 'Install it manually by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
     end
     else if WslCheckCode = 11 then begin
-      { WSL present but no Ubuntu distro }
-      MsgBox('WSL is installed but no Ubuntu distribution was found. A terminal window will now open to install Ubuntu. Please wait for it to finish.', mbInformation, MB_OK);
-      Exec(
-        ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
-        '-NoProfile -ExecutionPolicy Bypass -Command "wsl --install -d Ubuntu; Write-Host ''''; Write-Host ''Done. Press Enter to close...''; Read-Host"',
-        '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
-      MsgBox('Ubuntu installation has run.' + #13#10#13#10 + 'Use the desktop shortcut to launch Odysseus. If Ubuntu prompts you to create a Linux username and password on first run, complete that step and relaunch.', mbInformation, MB_OK);
+      MsgBox('WSL is installed, but no Ubuntu distribution was found.' + #13#10#13#10 + 'Install Ubuntu manually by running "wsl --install -d Ubuntu" in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete Linux username/password setup. After that, launch Odysseus.', mbCriticalError, MB_OK);
     end
     else begin
       { WSL and Ubuntu already present (exit 0) }
