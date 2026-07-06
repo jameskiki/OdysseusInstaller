@@ -1,6 +1,15 @@
 [Setup]
 AppName=Odysseus AI Environment
 AppVersion=1.0.0
+AppPublisher=Odysseus Team
+AppPublisherURL=https://github.com/pewdiepie-archdaemon/odysseus
+AppSupportURL=https://github.com/pewdiepie-archdaemon/odysseus/issues
+VersionInfoCompany=Odysseus Team
+VersionInfoDescription=Odysseus AI Environment Installer
+VersionInfoProductName=Odysseus AI Environment
+VersionInfoProductVersion=1.0.0
+VersionInfoVersion=1.0.0.0
+VersionInfoCopyright=Copyright (c) Odysseus Team
 DefaultDirName={autopf}\Odysseus
 DefaultGroupName=Odysseus AI
 OutputBaseFilename=Odysseus_Setup
