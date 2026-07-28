@@ -48,8 +48,14 @@ var
   RebuildModePage: TInputOptionWizardPage;
   IPPage: TInputQueryWizardPage;
   UninstallCleanupPrompted: Boolean;
+  UninstallFreshMode: Boolean;
   RemoveLocalRuntimeData: Boolean;
   RemoveWslWorkspaceData: Boolean;
+  RemoveWslDockerArtifacts: Boolean;
+  RemoveOllamaModelsData: Boolean;
+  RemoveOllamaApplication: Boolean;
+  RemoveWslDistroData: Boolean;
+  DisableWslRuntime: Boolean;
   RemoveResidualInstallFiles: Boolean;
 
 procedure OnDeploymentTypeChange(Sender: TObject);
@@ -282,54 +288,193 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+procedure ApplyUninstallPreset(IsFresh: Boolean);
+begin
+  UninstallFreshMode := IsFresh;
+
+  if IsFresh then begin
+    RemoveResidualInstallFiles := True;
+    RemoveLocalRuntimeData := True;
+    RemoveWslWorkspaceData := True;
+    RemoveWslDockerArtifacts := True;
+    RemoveOllamaModelsData := True;
+    RemoveOllamaApplication := True;
+    RemoveWslDistroData := False;
+    DisableWslRuntime := False;
+  end
+  else begin
+    RemoveResidualInstallFiles := True;
+    RemoveLocalRuntimeData := False;
+    RemoveWslWorkspaceData := False;
+    RemoveWslDockerArtifacts := False;
+    RemoveOllamaModelsData := False;
+    RemoveOllamaApplication := False;
+    RemoveWslDistroData := False;
+    DisableWslRuntime := False;
+  end;
+end;
+
+procedure PromptForUninstallSelections;
+begin
+  RemoveResidualInstallFiles :=
+    MsgBox(
+      'Remove the installed Odysseus program files folder after uninstall completes?' + #13#10 + #13#10 +
+      '- Installation directory under Program Files',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveLocalRuntimeData :=
+    MsgBox(
+      'Remove local Odysseus runtime data for this Windows user?' + #13#10 + #13#10 +
+      '- Logs in %LOCALAPPDATA%\Odysseus\Logs' + #13#10 +
+      '- Cached user settings/state under %LOCALAPPDATA%\Odysseus' + #13#10 +
+      '- User environment variable OLLAMA_HOST',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveWslWorkspaceData :=
+    MsgBox(
+      'Remove Odysseus workspace files inside Ubuntu WSL?' + #13#10 + #13#10 +
+      '- ~/odysseus' + #13#10 +
+      '- ~/run_odysseus.sh',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveWslDockerArtifacts :=
+    MsgBox(
+      'Remove Odysseus Docker artifacts in WSL (containers, project volumes, and networks)?' + #13#10 + #13#10 +
+      'This targets the Odysseus compose project only.',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveOllamaModelsData :=
+    MsgBox(
+      'Remove Ollama models and local Ollama cache data?' + #13#10 + #13#10 +
+      '- %USERPROFILE%\.ollama\models' + #13#10 +
+      '- %LOCALAPPDATA%\Ollama',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveOllamaApplication :=
+    MsgBox(
+      'Uninstall the Ollama Windows application (if installed)?',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  RemoveWslDistroData :=
+    MsgBox(
+      'Also remove the Odysseus Ubuntu distro data by unregistering the detected Odysseus distro?' + #13#10 + #13#10 +
+      'WARNING: This permanently deletes all files in that distro.',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  DisableWslRuntime :=
+    MsgBox(
+      'Also disable the Windows WSL runtime feature?' + #13#10 + #13#10 +
+      'WARNING: This affects all WSL usage on this PC and may require a reboot.',
+      mbConfirmation, MB_YESNO) = IDYES;
+end;
+
+function ConfirmDestructiveWslActions: Boolean;
+begin
+  Result := True;
+
+  if not (RemoveWslDistroData or DisableWslRuntime) then
+    exit;
+
+  Result :=
+    MsgBox(
+      'Final confirmation:' + #13#10 + #13#10 +
+      'You selected irreversible WSL cleanup options.' + #13#10 +
+      '- Distro unregister permanently deletes distro data.' + #13#10 +
+      '- WSL runtime disable affects system-wide WSL usage.' + #13#10 + #13#10 +
+      'Do you want to continue with these destructive actions?',
+      mbConfirmation, MB_YESNO) = IDYES;
+
+  if not Result then begin
+    RemoveWslDistroData := False;
+    DisableWslRuntime := False;
+  end;
+end;
+
+procedure RunSelectedCleanupActions;
 var
   LocalDataDir: string;
+begin
+  if RemoveLocalRuntimeData then begin
+    LocalDataDir := ExpandConstant('{localappdata}\Odysseus');
+    if DirExists(LocalDataDir) then
+      DelTree(LocalDataDir, True, True, True);
+
+    RunPowerShellHidden('[Environment]::SetEnvironmentVariable(''OLLAMA_HOST'', $null, ''User'')');
+  end;
+
+  if RemoveWslWorkspaceData then begin
+    RunPowerShellHidden(
+      '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }; ' +
+      '$target = $distros | Select-Object -First 1; ' +
+      'if ($target) { wsl -d $target -- bash -lc ''rm -rf ~/odysseus ~/run_odysseus.sh'' 2>$null | Out-Null }');
+  end;
+
+  if RemoveWslDockerArtifacts then begin
+    RunPowerShellHidden(
+      '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }; ' +
+      '$target = $distros | Select-Object -First 1; ' +
+      'if ($target) { ' +
+      'wsl -d $target -- bash -lc ''cd ~/odysseus 2>/dev/null && docker compose down --volumes --remove-orphans'' 2>$null | Out-Null; ' +
+      'wsl -d $target -- bash -lc ''cd ~/odysseus 2>/dev/null && sudo -n docker compose down --volumes --remove-orphans'' 2>$null | Out-Null }');
+  end;
+
+  if RemoveOllamaModelsData then begin
+    RunPowerShellHidden(
+      '$paths = @("$env:USERPROFILE\\.ollama\\models", "$env:LOCALAPPDATA\\Ollama"); ' +
+      'foreach ($p in $paths) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } }');
+  end;
+
+  if RemoveOllamaApplication then begin
+    RunPowerShellHidden(
+      '$entries = Get-ItemProperty ''HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'', ''HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'', ''HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like ''Ollama*'' }; ' +
+      '$entry = $entries | Select-Object -First 1; ' +
+      'if ($entry) { ' +
+      'if ($entry.QuietUninstallString) { Start-Process -FilePath ''cmd.exe'' -ArgumentList ''/c'', $entry.QuietUninstallString -WindowStyle Hidden -Wait } ' +
+      'elseif ($entry.UninstallString) { Start-Process -FilePath ''cmd.exe'' -ArgumentList ''/c'', ($entry.UninstallString + '' /S'') -WindowStyle Hidden -Wait } }');
+  end;
+
+  if RemoveWslDistroData then begin
+    RunPowerShellHidden(
+      '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }; ' +
+      '$target = $distros | Select-Object -First 1; ' +
+      'if ($target) { wsl --unregister $target 2>$null | Out-Null }');
+  end;
+
+  if DisableWslRuntime then begin
+    RunPowerShellHidden(
+      'dism.exe /Online /Disable-Feature /FeatureName:Microsoft-Windows-Subsystem-Linux /NoRestart 1>$null 2>$null');
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usUninstall) and (not UninstallCleanupPrompted) then begin
     UninstallCleanupPrompted := True;
 
-    RemoveLocalRuntimeData :=
+    UninstallFreshMode :=
       MsgBox(
-        'Remove local Odysseus runtime data for this Windows user?' + #13#10 + #13#10 +
-        '- Logs in %LOCALAPPDATA%\Odysseus\Logs' + #13#10 +
-        '- Cached user settings/state under %LOCALAPPDATA%\Odysseus' + #13#10 +
-        '- User environment variable OLLAMA_HOST',
+        'Select uninstall mode:' + #13#10 + #13#10 +
+        'YES = Fresh cleanup mode (recommended for clean reinstallation).' + #13#10 +
+        'NO = Preserve mode (faster reinstall; keeps environment data).',
         mbConfirmation, MB_YESNO) = IDYES;
 
-    RemoveWslWorkspaceData :=
-      MsgBox(
-        'Remove Odysseus files inside Ubuntu WSL as well?' + #13#10 + #13#10 +
-        '- ~/odysseus' + #13#10 +
-        '- ~/run_odysseus.sh' + #13#10 + #13#10 +
-        'This does not uninstall WSL or Ubuntu itself.',
-        mbConfirmation, MB_YESNO) = IDYES;
+    ApplyUninstallPreset(UninstallFreshMode);
 
-    RemoveResidualInstallFiles :=
-      MsgBox(
-        'After uninstall finishes, remove any remaining files in the installation folder if any are left behind?',
-        mbConfirmation, MB_YESNO) = IDYES;
+    if MsgBox('Do you want to review and customize individual uninstall components?', mbConfirmation, MB_YESNO) = IDYES then
+      PromptForUninstallSelections;
 
-    if RemoveLocalRuntimeData then begin
-      LocalDataDir := ExpandConstant('{localappdata}\Odysseus');
-      if DirExists(LocalDataDir) then
-        DelTree(LocalDataDir, True, True, True);
-
-      RunPowerShellHidden('[Environment]::SetEnvironmentVariable(''OLLAMA_HOST'', $null, ''User'')');
-    end;
-
-    if RemoveWslWorkspaceData then begin
-      RunPowerShellHidden(
-        '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }; ' +
-        'foreach ($d in $distros) { wsl -d $d -- bash -lc ''rm -rf ~/odysseus ~/run_odysseus.sh'' 2>$null | Out-Null }');
-    end;
+    ConfirmDestructiveWslActions;
+    RunSelectedCleanupActions;
   end;
 
-  if (CurUninstallStep = usPostUninstall) and RemoveResidualInstallFiles then begin
-    if DirExists(ExpandConstant('{app}')) then
-      DelTree(ExpandConstant('{app}'), True, True, True);
-
+  if CurUninstallStep = usPostUninstall then begin
     RunPowerShellHidden(
       'netsh.exe advfirewall firewall delete rule name=''Odysseus AI Network Host'' 1>$null 2>$null');
+
+    if not RemoveResidualInstallFiles then
+      exit;
+
+    if DirExists(ExpandConstant('{app}')) then
+      DelTree(ExpandConstant('{app}'), True, True, True);
   end;
 end;
