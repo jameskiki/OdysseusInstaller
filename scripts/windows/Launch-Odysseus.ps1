@@ -376,6 +376,20 @@ function Invoke-WslCommand {
     }
 }
 
+function Ensure-HostModeForwarding {
+    if ($env:ODYSSEUS_HOST_MODE -ne '1') {
+        return
+    }
+
+    $probe = Invoke-WslCommand -Command 'printf ''%s'' "${ODYSSEUS_HOST_MODE:-}"'
+    $forwardedValue = ($probe.Output -join '').Trim()
+    if ($probe.ExitCode -ne 0 -or $forwardedValue -ne '1') {
+        throw "Host mode is selected, but ODYSSEUS_HOST_MODE was not forwarded into WSL (observed='$forwardedValue'). Reinstall or relaunch Odysseus and retry."
+    }
+
+    Write-Host "[INFO] Host mode forwarding verified (ODYSSEUS_HOST_MODE=1 in WSL)." -ForegroundColor DarkGray
+}
+
 function Test-HttpEndpoint {
     param(
         [string]$Uri,
@@ -652,6 +666,12 @@ Invoke-Step `
         if ($env:ODYSSEUS_WSL_RESTART_REQUIRED -eq '1') {
             Write-Host "WSL systemd was enabled and WSL was restarted." -ForegroundColor DarkGray
         }
+    }
+
+Invoke-Step `
+    -Intent "Verifying host-mode environment forwarding into WSL..." `
+    -Action {
+        Ensure-HostModeForwarding
     }
 
 Invoke-Step `

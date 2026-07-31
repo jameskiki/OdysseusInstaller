@@ -53,7 +53,7 @@ Use the **Launch Odysseus (Local)** shortcut on your desktop. A terminal window 
 |---|---|
 | **Local** | Odysseus runs on your machine; only you can access it. |
 | **Local + Host** | Odysseus runs on your machine; colleagues on the same network can also connect. |
-| **Connect to shared instance** | You connect to a colleague's machine that is already running Odysseus as a host. Enter their IP address in the wizard. |
+| **Connect to shared instance** | You connect to a colleague's machine that is already running Odysseus as a host. Enter their IPv4 address in the wizard. |
 
 ---
 

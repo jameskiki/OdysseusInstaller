@@ -319,6 +319,28 @@ HOSTEOF
     upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
 }
 
+verify_host_mode_compose_configuration() {
+    local env_file="$1"
+    local compose_line
+    local compose_value
+
+    if [ "${ODYSSEUS_HOST_MODE:-0}" != "1" ]; then
+        return 0
+    fi
+
+    if [ ! -f docker-compose.host-mode.override.yml ]; then
+        print_fail "Host mode is enabled, but docker-compose.host-mode.override.yml was not generated."
+    fi
+
+    compose_line=$(grep '^COMPOSE_FILE=' "$env_file" | tail -n 1 || true)
+    compose_value="${compose_line#COMPOSE_FILE=}"
+    if ! printf '%s' "$compose_value" | grep -q 'docker-compose.host-mode.override.yml'; then
+        print_fail "Host mode is enabled, but COMPOSE_FILE does not include docker-compose.host-mode.override.yml."
+    fi
+
+    print_ok "Host mode compose override verified."
+}
+
 configure_gateway_endpoints() {
     local env_file="$1"
     local gateway_host
@@ -461,6 +483,13 @@ ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
 
+case "$ODYSSEUS_HOST_MODE" in
+    0|1) ;;
+    *)
+        print_fail "Invalid ODYSSEUS_HOST_MODE value '$ODYSSEUS_HOST_MODE'. Expected 0 or 1 from launcher forwarding."
+        ;;
+esac
+
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
     if git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
@@ -491,6 +520,7 @@ fi
 
 print_step "Applying host connectivity and compose profile settings..."
 configure_compose_files ".env"
+verify_host_mode_compose_configuration ".env"
 configure_gateway_endpoints ".env"
 print_ok "Environment endpoints and compose profiles aligned."
 

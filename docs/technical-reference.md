@@ -88,6 +88,7 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
   - `ODYSSEUS_REPO_REF`
   - `ODYSSEUS_REBUILD`
   - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- When host mode is selected, verifies `ODYSSEUS_HOST_MODE=1` is actually visible inside WSL before continuing.
 
 ### Main pipeline
 
@@ -98,12 +99,13 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
    - Supports variants like `Ubuntu-22.04`
 4. Ensure Ubuntu first-run initialization is complete (`Ensure-UbuntuInitialized`).
 5. Ensure WSL systemd is enabled (`Ensure-WslSystemdEnabled`), update `/etc/wsl.conf` if needed, then restart WSL.
-6. Ensure Ollama availability (`Ensure-OllamaAvailable`) and all-interface binding (`Ensure-OllamaEndpoint`).
-7. Stage `run_odysseus.sh` into Ubuntu (`~/run_odysseus.sh`) with LF normalization.
-8. Execute Linux bootstrap script.
-9. Poll Odysseus endpoint readiness (`http://localhost:7000`) with retry loop.
-10. Open browser.
-11. Start `Start-OdysseusWatchdog` loop (10s interval, `auto-heal-light`).
+6. Verify host-mode env forwarding (`Ensure-HostModeForwarding`) when host mode is enabled.
+7. Ensure Ollama availability (`Ensure-OllamaAvailable`) and all-interface binding (`Ensure-OllamaEndpoint`).
+8. Stage `run_odysseus.sh` into Ubuntu (`~/run_odysseus.sh`) with LF normalization.
+9. Execute Linux bootstrap script.
+10. Poll Odysseus endpoint readiness (`http://localhost:7000`) with retry loop.
+11. Open browser.
+12. Start `Start-OdysseusWatchdog` loop (10s interval, `auto-heal-light`).
 
 ### Watchdog behavior
 
@@ -146,6 +148,7 @@ This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odys
 - base: `docker-compose.yml`
 - NVIDIA: add `docker-compose.gpu-nvidia.yml` when GPU tooling is available
 - host mode: generates `docker-compose.host-mode.override.yml` and appends it
+- host mode verification: fails fast if the host-mode override file or compose chain entry is missing while host mode is enabled
 
 This replaces older approaches that rewrote `docker-compose.yml` with `sed`.
 
@@ -158,6 +161,7 @@ This replaces older approaches that rewrote `docker-compose.yml` with `sed`.
 ### Source sync and startup
 
 - Clones or updates `~/odysseus` using `ODYSSEUS_REPO_REF`.
+- Fails fast when `~/odysseus` has uncommitted/untracked changes to avoid unsafe fast-forward updates.
 - Starts containers with or without rebuild using `ODYSSEUS_REBUILD`.
 - Polls local endpoint `http://127.0.0.1:7000` for readiness.
 
@@ -165,7 +169,7 @@ This replaces older approaches that rewrote `docker-compose.yml` with `sed`.
 
 On first boot:
 - Captures password-related log output to `~/.odysseus-initial-admin-password.txt`.
-- Uses fallback `tail -n 200` content when no password line is found.
+- Searches a bounded recent log window for password lines and keeps a shorter fallback tail when no explicit password line is found.
 - Sets file mode to 600.
 - Prints the saved output and waits for explicit user confirmation before continuing.
 
