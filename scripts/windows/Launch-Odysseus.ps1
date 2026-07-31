@@ -113,8 +113,26 @@ function Resolve-UbuntuDistro {
     return $ubuntuVariant
 }
 
+function Report-WslUserSessionWarning {
+    param ([string[]]$OutputLines)
+
+    if (-not $OutputLines) {
+        return
+    }
+
+    $warningLine = $OutputLines | Where-Object {
+        $_ -match "wsl:\s+Failed to start the systemd user session for '.*'"
+    } | Select-Object -First 1
+
+    if ($warningLine) {
+        Write-Host "[WARN] WSL reported a systemd user-session startup warning. Continuing because core checks still passed." -ForegroundColor Yellow
+        Write-Host "[WARN] $warningLine" -ForegroundColor Yellow
+    }
+}
+
 function Ensure-UbuntuInitialized {
-    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
+    $initCheckOutput = & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1' 2>&1
+    Report-WslUserSessionWarning -OutputLines $initCheckOutput
     if ($LASTEXITCODE -eq 0) {
         return
     }
@@ -123,7 +141,8 @@ function Ensure-UbuntuInitialized {
     Write-Host "A Linux terminal will open now. Complete the username/password prompts, then close it." -ForegroundColor Yellow
     & wsl.exe -d $WslDistro
 
-    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
+    $initRecheckOutput = & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1' 2>&1
+    Report-WslUserSessionWarning -OutputLines $initRecheckOutput
     if ($LASTEXITCODE -ne 0) {
         throw "Ubuntu initialization is incomplete. Run the 'Prepare WSL for Odysseus' shortcut, complete Linux username/password creation when prompted, then rerun Odysseus."
     }
