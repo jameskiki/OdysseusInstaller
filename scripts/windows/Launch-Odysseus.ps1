@@ -1,3 +1,7 @@
+param(
+    [switch]$TestMode
+)
+
 Clear-Host
 $ErrorActionPreference = 'Stop'
 
@@ -21,8 +25,11 @@ if (-not (Test-Path $BootstrapScript)) {
 $HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
 $RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
 $RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
+$TestModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_TEST_MODE'
 $IsHostMode = Test-Path $HostModeFile
+$IsTestMode = $TestMode -or (Test-Path $TestModeFile) -or ($env:ODYSSEUS_TEST_MODE -match '^(1|true|yes)$')
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
+$env:ODYSSEUS_TEST_MODE = if ($IsTestMode) { '1' } else { '0' }
 $repoRef = 'main'
 if (Test-Path $RepoRefFile) {
     $rawRepoRef = (Get-Content -Path $RepoRefFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
@@ -39,17 +46,26 @@ if (Test-Path $RebuildModeFile) {
     }
 }
 
+if ($IsTestMode) {
+    $rebuildMode = 'never'
+}
+
 $env:ODYSSEUS_REPO_REF = $repoRef
 switch ($rebuildMode) {
     'always' { $env:ODYSSEUS_REBUILD = '1' }
     'never' { $env:ODYSSEUS_REBUILD = '0' }
     default {
-        $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
-        $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        if ($IsTestMode) {
+            $env:ODYSSEUS_REBUILD = '0'
+        }
+        else {
+            $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
+            $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        }
     }
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE')
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -104,19 +120,11 @@ function Ensure-UbuntuInitialized {
 }
 
 function Ensure-WslSystemdEnabled {
-    $configCheckAwk = @'
-BEGIN { in_boot = 0; enabled = 0 }
-/^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
-  in_boot = ($0 ~ /^[[:space:]]*\[boot\][[:space:]]*$/) ? 1 : 0
-  next
-}
-in_boot && /^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?[[:space:]]*$/ {
-  enabled = 1
-}
-END { exit(enabled ? 0 : 1) }
+    $configCheckCmd = @'
+sed -n '/^[[:space:]]*\[boot\][[:space:]]*$/,/^[[:space:]]*\[[^]]+\][[:space:]]*$/p' /etc/wsl.conf 2>/dev/null | \
+grep -Eq '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?[[:space:]]*$'
 '@
-    $configCheckAwkOneLine = ($configCheckAwk -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
-    $configCheckCmd = "awk '$configCheckAwkOneLine' /etc/wsl.conf 2>/dev/null"
+    $configCheckCmd = $configCheckCmd -replace "`r", ''
     $runtimeCheckCmd = '[ "$(ps -p 1 -o comm= 2>/dev/null | tr -d "[:space:]")" = "systemd" ]'
 
     & wsl.exe -d $WslDistro -u root -- bash -c $configCheckCmd
@@ -130,8 +138,11 @@ END { exit(enabled ? 0 : 1) }
 BEGIN { in_boot = 0; boot_seen = 0; systemd_written = 0 }
 /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
   if (in_boot && !systemd_written) { print "systemd=true"; systemd_written = 1 }
-  in_boot = ($0 ~ /^[[:space:]]*\[boot\][[:space:]]*$/) ? 1 : 0
-  if (in_boot) boot_seen = 1
+    in_boot = 0
+    if (/^[[:space:]]*\[boot\][[:space:]]*$/) {
+        in_boot = 1
+        boot_seen = 1
+    }
   print; next
 }
 in_boot && /^[[:space:]]*systemd[[:space:]]*=/ {
@@ -144,22 +155,24 @@ END {
   if (!boot_seen) { print ""; print "[boot]"; print "systemd=true" }
 }
 '@
-    $bashCmd = @"
+    $bashCmd = @'
 set -e
 touch /etc/wsl.conf
-tmp_conf="\$(mktemp /tmp/wsl.conf.XXXXXX)"
-tmp_awk="\$(mktemp /tmp/wsl-conf-edit.XXXXXX.awk)"
+umask 077
+tmp_conf="/tmp/wsl.conf.$$.tmp"
+if [ -e "$tmp_conf" ]; then
+  tmp_conf="/tmp/wsl.conf.$$.$(date +%s).$RANDOM.tmp"
+fi
 
-cat > "\$tmp_awk" <<'AWK'
-$awkScript
-AWK
+awk '
+__ODYSSEUS_AWK_SCRIPT__
+' /etc/wsl.conf > "$tmp_conf"
+mv "$tmp_conf" /etc/wsl.conf
+'@
+    # Ensure bash receives LF line endings and the literal awk program text.
+    $bashCmd = $bashCmd.Replace('__ODYSSEUS_AWK_SCRIPT__', $awkScript) -replace "`r", ''
 
-awk -f "\$tmp_awk" /etc/wsl.conf > "\$tmp_conf"
-mv "\$tmp_conf" /etc/wsl.conf
-rm -f "\$tmp_awk"
-"@
-
-        & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
+        $bashCmd | & wsl.exe -d $WslDistro -u root -- bash -s
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
         }
@@ -666,7 +679,9 @@ function Invoke-Step {
             Write-Host "Full log: $LogFile" -ForegroundColor DarkGray
         }
         try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-        Read-Host 'Press Enter to close...'
+        if (-not $IsTestMode) {
+            Read-Host 'Press Enter to close...'
+        }
         exit 1
     }
 }
@@ -674,6 +689,9 @@ function Invoke-Step {
 Invoke-Step `
     -Intent "Applying local runtime preferences (branch/ref '$repoRef', rebuild mode '$rebuildMode')..." `
     -Action {
+        if ($IsTestMode) {
+            Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
+        }
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }
@@ -717,6 +735,18 @@ Invoke-Step `
     -Action {
         Ensure-HostModeForwarding
     }
+
+if ($IsTestMode) {
+    Invoke-Step `
+        -Intent "Stopping after launcher preflight validation because test mode is enabled..." `
+        -Action {
+            Write-Host "[INFO] Skipped Ollama auto-install, Linux bootstrap, endpoint polling, browser launch, and watchdog startup." -ForegroundColor DarkGray
+        }
+
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    Write-Host 'Odysseus launcher preflight test finished.' -ForegroundColor DarkGray
+    exit 0
+}
 
 Invoke-Step `
     -Intent "Checking local Ollama runtime for model discovery compatibility..." `

@@ -101,7 +101,9 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
   - `ODYSSEUS_REPO_REF`
   - `ODYSSEUS_REBUILD`
   - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+  - `ODYSSEUS_TEST_MODE`
 - When host mode is selected, verifies `ODYSSEUS_HOST_MODE=1` is actually visible inside WSL before continuing.
+- Test mode can be enabled with `-TestMode`, `ODYSSEUS_TEST_MODE=1`, or an `ODYSSEUS_TEST_MODE` marker file beside the launcher. In that mode, rebuild is forced to `never` and the launcher stops after Windows/WSL preflight validation.
 
 ### Main pipeline
 
@@ -120,6 +122,8 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 11. Open browser.
 12. Start `Start-OdysseusWatchdog` loop (10s interval, `auto-heal-light`).
 
+In test mode, the pipeline stops after step 6 and skips Ollama installation/binding, Linux bootstrap, endpoint polling, browser launch, and watchdog startup.
+
 ### Watchdog behavior
 
 The watchdog continuously checks:
@@ -133,8 +137,8 @@ The watchdog continuously checks:
 On drift, it attempts lightweight recovery with `docker compose up -d` (with non-interactive sudo fallback).
 
 Systemd configuration hardening:
-- The `/etc/wsl.conf` mutation path now writes an awk script to a temporary file and executes it with `awk -f`.
-- This avoids quote-collapsing issues that can occur when embedding multi-line awk directly in a one-line shell command.
+- The `/etc/wsl.conf` mutation path now streams a literal bash script to `bash -s` and writes through a temporary output file before replacing `/etc/wsl.conf`.
+- This avoids PowerShell interpolation and CRLF/quoting issues that can occur when embedding shell fragments directly in a `bash -c` command string.
 
 ---
 

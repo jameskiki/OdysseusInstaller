@@ -49,6 +49,14 @@ Use the **Launch Odysseus (Local)** shortcut on your desktop. A terminal window 
 
 > **First time only:** The terminal will display a randomly generated admin password before opening the browser. Copy it — you will need it to log in.
 
+For repeatable launcher-only validation without prompts, installs, browser launch, or watchdog startup, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Launch-Odysseus.ps1 -TestMode
+```
+
+The launcher also enables the same preflight-only mode when an `ODYSSEUS_TEST_MODE` file is present beside `Launch-Odysseus.ps1` or when `ODYSSEUS_TEST_MODE=1` is set in the environment.
+
 ---
 
 ## Deployment Modes
