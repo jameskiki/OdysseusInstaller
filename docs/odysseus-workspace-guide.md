@@ -107,6 +107,8 @@ Your conversations are saved automatically. You can:
 
 The installer detects your GPU automatically. If no NVIDIA GPU is found, you will see a warning during installation — you can still proceed and use Odysseus in CPU mode.
 
+AMD note: the current installer does not auto-detect AMD GPU acceleration paths. On AMD hardware, expect CPU fallback behavior unless you manually configure a supported acceleration stack.
+
 ---
 
 ## Network Sharing (Host Mode)

@@ -23,9 +23,9 @@ The installer has five meaningful pages:
 
 1. Licence agreement.
 2. Deployment type (local vs remote, with optional host mode).
-3. Odysseus version selection (`RepoRefPage`).
+3. Odysseus version selection (`RepoRefPage`) via dropdown populated from remote GitHub branches.
 4. Container rebuild preference (`RebuildModePage`).
-5. Host IP input (`IPPage`) for remote mode.
+5. Host IP input (`IPPage`) for remote mode, including a live URL preview.
 
 `ShouldSkipPage` conditionally skips pages depending on selected deployment mode:
 - Remote install skips repo ref and rebuild pages.
@@ -38,15 +38,28 @@ The installer has five meaningful pages:
 | `IsLocalInstallation` | True when local mode is selected |
 | `IsRemoteInstallation` | True when remote mode is selected |
 | `IsHostSelected` | True when local mode + host checkbox are selected |
+| `PopulateRepoBranches` | Loads remote branch list from GitHub into the version dropdown |
+| `GetSelectedRepoRef` | Returns selected branch name (defaults to `main`) |
+| `UpdateRemoteReachabilityHint` | Shows expected remote URL while host IP is entered |
+| `UpdateReadyMemo` | Builds categorized pre-install summary on the Ready page |
 | `GetSelectedRebuildMode` | Returns `ask`, `always`, or `never` |
 | `GetRemoteIP` | Returns trimmed remote host IP, defaulting to `127.0.0.1` |
-| `NextButtonClick` | Validates GPU warning path, remote IP, and repo ref inputs |
+| `NextButtonClick` | Validates GPU warning path, remote IP, and branch selection |
 | `CurStepChanged` (`ssPostInstall`) | Writes installer sentinel files and performs WSL/Ubuntu readiness checks with prerequisite guidance |
 
 WSL behavior in the installer is readiness-check only.
 - The installer does not run `wsl --install` or bootstrap Ubuntu automatically.
 - If WSL or Ubuntu is missing, it shows a blocking guidance message telling the user to install WSL2 + Ubuntu manually, reboot if required, launch Ubuntu once to create the Linux user, and then rerun Odysseus.
 - If both are present, it shows the normal ready-to-launch message.
+
+Ready-page summary behavior:
+- Local mode preflights WSL, Ubuntu, Ollama, and winget availability.
+- Summary is grouped into: `Already present`, `Will be installed/configured`, and `Manual action required`.
+- Remote mode summary includes the explicit shortcut target URL derived from entered host IP.
+
+GPU note behavior:
+- Installer UI now states that NVIDIA remains the best-supported acceleration path.
+- AMD acceleration is not auto-detected by the installer and may run via CPU fallback.
 
 ### Installer outputs and shortcuts
 
@@ -118,6 +131,10 @@ The watchdog continuously checks:
 - Odysseus HTTP endpoint (`http://localhost:7000`)
 
 On drift, it attempts lightweight recovery with `docker compose up -d` (with non-interactive sudo fallback).
+
+Systemd configuration hardening:
+- The `/etc/wsl.conf` mutation path now writes an awk script to a temporary file and executes it with `awk -f`.
+- This avoids quote-collapsing issues that can occur when embedding multi-line awk directly in a one-line shell command.
 
 ---
 

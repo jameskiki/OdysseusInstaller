@@ -124,8 +124,8 @@ END { exit(enabled ? 0 : 1) }
     $didRestartWsl = $false
 
     if (-not $configAlreadyEnabled) {
-        # Not enabled — write /etc/wsl.conf via a single-line awk pipeline that is
-        # idempotent and handles all three cases (no file, [boot] present, [boot] absent).
+        # Not enabled — write /etc/wsl.conf via a temporary awk script file to avoid
+        # shell-quoting issues and keep the update idempotent.
         $awkScript = @'
 BEGIN { in_boot = 0; boot_seen = 0; systemd_written = 0 }
 /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
@@ -144,8 +144,20 @@ END {
   if (!boot_seen) { print ""; print "[boot]"; print "systemd=true" }
 }
 '@
-        $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
-        $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
+    $bashCmd = @"
+set -e
+touch /etc/wsl.conf
+tmp_conf="\$(mktemp /tmp/wsl.conf.XXXXXX)"
+tmp_awk="\$(mktemp /tmp/wsl-conf-edit.XXXXXX.awk)"
+
+cat > "\$tmp_awk" <<'AWK'
+$awkScript
+AWK
+
+awk -f "\$tmp_awk" /etc/wsl.conf > "\$tmp_conf"
+mv "\$tmp_conf" /etc/wsl.conf
+rm -f "\$tmp_awk"
+"@
 
         & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
         if ($LASTEXITCODE -ne 0) {

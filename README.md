@@ -11,6 +11,7 @@ OdysseusInstaller is a Windows wizard that installs and launches the Odysseus AI
 | Windows 10 / 11 (64-bit) | Required |
 | WSL2 with Ubuntu | Required before running the Odysseus installer or launcher |
 | NVIDIA GPU | Optional — improves response speed significantly; CPU-only mode also works |
+| AMD GPU | Supported via CPU fallback path; GPU acceleration is not auto-detected by the installer |
 | Ollama | Auto-installed by the launcher if not found |
 
 Before launching Odysseus, install WSL2 with Ubuntu by running `wsl --install -d Ubuntu` in an elevated terminal. Reboot if Windows prompts you to do so. Then launch Ubuntu once and complete the Linux username/password setup. After that, launch Odysseus.
@@ -37,6 +38,9 @@ Double-click `Odysseus_Setup.exe` and follow the wizard.
 
 - Accept the licence agreement.
 - Choose your **deployment mode** (see below).
+- For local installs, pick a remote Odysseus branch from the dropdown (auto-loaded from GitHub).
+- For remote installs, enter host IP and verify the shown URL preview (`http://<host-ip>:7000`).
+- Review the pre-install summary grouped as: **Already present**, **Will be installed/configured**, and **Manual action required**.
 - Click **Install**.
 
 **3. Launch Odysseus**
