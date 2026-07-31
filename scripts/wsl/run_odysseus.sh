@@ -501,7 +501,9 @@ if [ ! -d "$TARGET_DIR" ]; then
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
-    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    git_status_output="$(git status --porcelain --untracked-files=normal)"
+    filtered_status_output="$(printf '%s\n' "$git_status_output" | grep -vE '^[?][?] \.env(\..*)?$' || true)"
+    if [ -n "$filtered_status_output" ]; then
         print_fail "Odysseus workspace has uncommitted or untracked changes in ~/odysseus. Commit, stash, or discard those changes before rerunning."
     fi
 
