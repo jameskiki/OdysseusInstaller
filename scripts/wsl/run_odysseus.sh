@@ -5,6 +5,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
+print_warn() { echo -e "\e[1;33m[WARN] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
 
 run_with_progress() {
@@ -482,6 +483,19 @@ FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
+ODYSSEUS_WINDOWS_HOST_OVERRIDE=${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}
+ODYSSEUS_TEST_MODE=${ODYSSEUS_TEST_MODE:-0}
+
+print_step "Launch summary"
+echo "Deployment mode: $( [ "$ODYSSEUS_HOST_MODE" = "1" ] && echo "host-enabled local" || echo "local" )"
+echo "Repo ref: $ODYSSEUS_REPO_REF"
+echo "Rebuild mode: $( [ "$ODYSSEUS_REBUILD" = "1" ] && echo "always" || echo "never" )"
+echo "Test mode: $( [ "$ODYSSEUS_TEST_MODE" = "1" ] && echo "enabled" || echo "disabled" )"
+if [ -n "$ODYSSEUS_WINDOWS_HOST_OVERRIDE" ]; then
+    echo "Windows host override: $ODYSSEUS_WINDOWS_HOST_OVERRIDE"
+else
+    echo "Windows host override: auto"
+fi
 
 case "$ODYSSEUS_HOST_MODE" in
     0|1) ;;
