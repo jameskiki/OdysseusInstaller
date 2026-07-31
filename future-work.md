@@ -20,3 +20,7 @@
 	- WSL reachability failed: curl to Ollama /api/tags from WSL failed for 172.29.112.1 and host.docker.internal.
 	- Odysseus endpoint failed: 127.0.0.1:7000 not reachable after launch.
 	- Follow-up: add troubleshooting guidance and/or automatic remediation for the three failures above.
+	- Docker bind conflict follow-up (2026-07-31): a fresh reinstall/relaunch still fails during compose startup with `failed to bind host port 127.0.0.1:7000/tcp: address already in use`.
+		- Evidence: `docker compose ps` showed the other Odysseus services up, but `odysseus-odysseus-1` could not be recreated because port 7000 was already occupied.
+		- `docker ps entries that publish 7000` returned no obvious container entry, so the conflict likely comes from a stale or hidden listener in the WSL/Docker environment.
+		- Next step: identify the process or network namespace still holding 127.0.0.1:7000, then decide whether to stop it, switch the bind address, or add a preflight check before compose startup.
