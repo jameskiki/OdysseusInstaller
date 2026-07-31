@@ -516,6 +516,19 @@ begin
   end;
 end;
 
+function TestRemoteHostReachability(TargetHost: string): Boolean;
+var
+  ResultCode: Integer;
+  Command: string;
+begin
+  Result := False;
+
+  Command := '-NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference=''Stop''; try { $client = New-Object System.Net.Sockets.TcpClient; $async = $client.BeginConnect("' + TargetHost + '", 7000, $null, $null); if (-not $async.AsyncWaitHandle.WaitOne(2000)) { $client.Close(); exit 1 }; $client.EndConnect($async); $client.Dispose(); exit 0 } catch { exit 1 }"';
+
+  if Exec(ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'), Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 0);
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   IsNvidiaDetected: Boolean;
@@ -536,6 +549,10 @@ begin
     end
     else if not IsValidIPv4Address(IPPage.Values[0]) then begin
       MsgBox('Enter a valid IPv4 address (for example: 192.168.1.45).', mbError, MB_OK);
+      Result := False;
+    end
+    else if not TestRemoteHostReachability(IPPage.Values[0]) then begin
+      MsgBox('The specified host could not be reached on port 7000. Confirm Odysseus is running and the address is correct before continuing.', mbError, MB_OK);
       Result := False;
     end;
   end;
