@@ -17,6 +17,16 @@ catch {
     # Transcript is best-effort; continue if it can't be started.
 }
 
+try {
+    $launcherHash = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    Write-Host "[INFO] Launcher source: $PSCommandPath" -ForegroundColor DarkGray
+    Write-Host "[INFO] Launcher SHA256: $launcherHash" -ForegroundColor DarkGray
+}
+catch {
+    Write-Host "[INFO] Launcher source: $PSCommandPath" -ForegroundColor DarkGray
+    Write-Host "[WARN] Unable to compute launcher hash: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 $WslDistro = $null
 $BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
 if (-not (Test-Path $BootstrapScript)) {
@@ -320,12 +330,17 @@ function Ensure-OllamaAvailable {
         -StdErrPath $wingetErrLog
 
     # winget returns Win32/HRESULT-style codes that may surface as signed or unsigned.
-    # Normalize to UInt32 first to avoid false negatives on successful installs.
+    # Normalize via two's-complement bytes so negative Int32 values map to the same
+    # UInt32 bit pattern (for example, -1978335189 == 0x8A15002B).
     # 0x00000000 = installed
     # 0x8A15002B = no applicable upgrade / already installed
     # 0x8A150109 = install succeeded, reboot recommended
-    $exitCode = [uint32]$proc.ExitCode
-    $successCodes = @([uint32]0x00000000, [uint32]0x8A15002B, [uint32]0x8A150109)
+    $exitCode = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$proc.ExitCode), 0)
+    $successCodes = @(
+        [uint32]0,
+        [System.UInt32]::Parse('8A15002B', [System.Globalization.NumberStyles]::HexNumber),
+        [System.UInt32]::Parse('8A150109', [System.Globalization.NumberStyles]::HexNumber)
+    )
     if ($successCodes -notcontains $exitCode) {
         $tail = ''
         if (Test-Path $wingetLog) {
@@ -374,7 +389,14 @@ function Ensure-OllamaEndpoint {
     for ($i = 0; $i -lt 20; $i++) {
         Write-Progress -Activity 'Starting Ollama service' -Status 'Waiting for http://localhost:11434 to respond.' -PercentComplete (($i / 20) * 100)
         Start-Sleep -Milliseconds 500
-        $probe = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        $probe = $null
+        try {
+            $probe = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        }
+        catch {
+            # Service may still be starting; keep polling until retries are exhausted.
+            $probe = $null
+        }
         if ($probe -and $probe.StatusCode -eq 200) {
             Write-Host "[INFO] Ollama localhost audit passed: http://localhost:11434/api/tags is reachable." -ForegroundColor DarkGray
             Write-Progress -Activity 'Starting Ollama service' -Completed
