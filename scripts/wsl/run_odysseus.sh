@@ -516,9 +516,9 @@ if [ ! -d "$TARGET_DIR" ]; then
 else
     cd "$TARGET_DIR"
     git_status_output="$(git status --porcelain --untracked-files=normal)"
-    filtered_status_output="$(printf '%s\n' "$git_status_output" | grep -vE '^[?][?] \.env(\..*)?$' || true)"
+    filtered_status_output="$(printf '%s\n' "$git_status_output" | grep -vE '^(\?\?| M|M |A |D |R |C |U |UU|AA|DD) \.env(\..*)?$' || true)"
     if [ -n "$filtered_status_output" ]; then
-        print_fail "Odysseus workspace has uncommitted or untracked changes in ~/odysseus. Commit, stash, or discard those changes before rerunning."
+        print_warn "Odysseus workspace has local changes in ~/odysseus; continuing with the launcher anyway."
     fi
 
     git fetch origin "$ODYSSEUS_REPO_REF"
