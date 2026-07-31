@@ -157,6 +157,55 @@ audit_ollama_gateway() {
     esac
 }
 
+show_compose_diagnostics() {
+    echo ""
+    print_warn "Collecting Docker compose diagnostics for the failed startup..."
+    echo "[INFO] docker compose ps:"
+    sudo docker compose ps || true
+    echo "[INFO] docker ps entries that publish 7000:"
+    sudo docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}' | grep -E '7000|0\.0\.0\.0:7000|127\.0\.0\.1:7000' || true
+    echo "[INFO] odysseus container logs (tail):"
+    sudo docker compose logs --tail 80 odysseus || true
+}
+
+start_compose_stack() {
+    local rebuild_mode="$1"
+    local compose_exit=0
+
+    if [ "$rebuild_mode" = "1" ]; then
+        run_with_progress "Building and starting application containers" sudo docker compose up -d --build
+        compose_exit=$?
+    else
+        run_with_progress "Starting application containers" sudo docker compose up -d
+        compose_exit=$?
+    fi
+
+    if [ "$compose_exit" -eq 0 ]; then
+        return 0
+    fi
+
+    if sudo docker compose logs --tail 80 odysseus 2>/dev/null | grep -qi 'address already in use\|bind.*7000'; then
+        print_warn "Docker reported a port 7000 binding conflict. Attempting a one-time cleanup of stale compose state and retrying once."
+        sudo docker compose down --remove-orphans >/dev/null 2>&1 || true
+        sudo docker ps --filter "publish=7000" -q | xargs -r sudo docker rm -f >/dev/null 2>&1 || true
+
+        if [ "$rebuild_mode" = "1" ]; then
+            run_with_progress "Retrying container startup after cleanup" sudo docker compose up -d --build
+            compose_exit=$?
+        else
+            run_with_progress "Retrying container startup after cleanup" sudo docker compose up -d
+            compose_exit=$?
+        fi
+    fi
+
+    if [ "$compose_exit" -ne 0 ]; then
+        show_compose_diagnostics
+        return "$compose_exit"
+    fi
+
+    return 0
+}
+
 is_ollama_reachable() {
     local host="$1"
     local url="http://${host}:11434/api/tags"
@@ -544,10 +593,14 @@ print_step "Auditing Windows-hosted Ollama reachability from WSL..."
 audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" "${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-$ODYSSEUS_WINDOWS_GATEWAY_IP}"
 
 print_step "Deploying application containers..."
-if [ "$ODYSSEUS_REBUILD" = "1" ]; then
-    run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers rebuilt and active in background."
+if start_compose_stack "$ODYSSEUS_REBUILD"; then
+    if [ "$ODYSSEUS_REBUILD" = "1" ]; then
+        print_ok "Containers rebuilt and active in background."
+    else
+        print_ok "Containers active in background (rebuild skipped)."
+    fi
 else
-    run_with_progress "Starting application containers" sudo docker compose up -d && print_ok "Containers active in background (rebuild skipped)."
+    print_fail "Container startup failed. Review the diagnostics above and resolve the reported port conflict or compose error before retrying."
 fi
 
 print_step "Polling local network port 7000 to verify runtime status..."
