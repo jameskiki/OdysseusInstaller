@@ -472,6 +472,10 @@ if [ ! -d "$TARGET_DIR" ]; then
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+        print_fail "Odysseus workspace has uncommitted or untracked changes in ~/odysseus. Commit, stash, or discard those changes before rerunning."
+    fi
+
     git fetch origin "$ODYSSEUS_REPO_REF"
     git checkout "$ODYSSEUS_REPO_REF"
     if git pull --ff-only origin "$ODYSSEUS_REPO_REF"; then
@@ -520,12 +524,13 @@ print_ok "Application socket online after ${COUNT}s."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
-    odysseus_logs="$(sudo docker compose logs odysseus)"
-    if ! printf '%s\n' "$odysseus_logs" | grep -i "password" > "$password_log"; then
+    password_search_tail=300
+    password_fallback_tail=120
+    if ! sudo docker compose logs --no-color --tail "$password_search_tail" odysseus | grep -i "password" > "$password_log"; then
         {
-            echo "No explicit password line was found in odysseus logs. Recent startup logs are included below:"
+            echo "No explicit password line was found in recent odysseus logs. A shortened startup tail is included below:"
             echo
-            printf '%s\n' "$odysseus_logs" | tail -n 200
+            sudo docker compose logs --no-color --tail "$password_fallback_tail" odysseus
         } > "$password_log"
     fi
     chmod 600 "$password_log" || true

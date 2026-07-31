@@ -175,6 +175,70 @@ begin
   if Result = '' then Result := '127.0.0.1';
 end;
 
+function IsDigitsOnly(const Value: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := Length(Value) > 0;
+  if not Result then
+    exit;
+
+  for I := 1 to Length(Value) do begin
+    if (Value[I] < '0') or (Value[I] > '9') then begin
+      Result := False;
+      exit;
+    end;
+  end;
+end;
+
+function IsValidIPv4Address(const Value: string): Boolean;
+var
+  Remaining: string;
+  Segment: string;
+  DotPos: Integer;
+  DotCount: Integer;
+  SegmentValue: Integer;
+begin
+  Result := False;
+  Remaining := Trim(Value);
+  if Remaining = '' then
+    exit;
+
+  DotCount := 0;
+  while True do begin
+    DotPos := Pos('.', Remaining);
+    if DotPos > 0 then begin
+      Segment := Copy(Remaining, 1, DotPos - 1);
+      Remaining := Copy(Remaining, DotPos + 1, Length(Remaining) - DotPos);
+      DotCount := DotCount + 1;
+    end
+    else begin
+      Segment := Remaining;
+      Remaining := '';
+    end;
+
+    if (Segment = '') or (Length(Segment) > 3) then
+      exit;
+    if not IsDigitsOnly(Segment) then
+      exit;
+
+    SegmentValue := StrToInt(Segment);
+    if (SegmentValue < 0) or (SegmentValue > 255) then
+      exit;
+
+    if (Length(Segment) > 1) and (Segment[1] = '0') then
+      exit;
+
+    if DotPos = 0 then
+      break;
+  end;
+
+  if DotCount <> 3 then
+    exit;
+
+  Result := True;
+end;
+
 function IsNvidiaGpuPresent: Boolean;
 var
   SubKeys: TArrayOfString;
@@ -210,6 +274,10 @@ begin
   if (CurPageID = IPPage.ID) and IsRemoteInstallation then begin
     if Trim(IPPage.Values[0]) = '' then begin
       MsgBox('Enter the IPv4 address of the workstation that is hosting Odysseus.', mbError, MB_OK);
+      Result := False;
+    end
+    else if not IsValidIPv4Address(IPPage.Values[0]) then begin
+      MsgBox('Enter a valid IPv4 address (for example: 192.168.1.45).', mbError, MB_OK);
       Result := False;
     end;
   end;
