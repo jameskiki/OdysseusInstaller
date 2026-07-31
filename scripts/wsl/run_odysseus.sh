@@ -603,10 +603,36 @@ else
     print_fail "Container startup failed. Review the diagnostics above and resolve the reported port conflict or compose error before retrying."
 fi
 
-print_step "Polling local network port 7000 to verify runtime status..."
+print_step "Polling Odysseus endpoint(s) on port 7000 to verify runtime status..."
 TIMEOUT=90
 COUNT=0
-until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/null; do
+probe_hosts=("127.0.0.1" "localhost")
+if [ "${ODYSSEUS_HOST_MODE:-0}" = "1" ]; then
+    if [ -n "${ODYSSEUS_WINDOWS_GATEWAY_IP:-}" ]; then
+        probe_hosts+=("${ODYSSEUS_WINDOWS_GATEWAY_IP}")
+    fi
+    gateway_ip=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+    if [ -n "$gateway_ip" ]; then
+        probe_hosts+=("$gateway_ip")
+    fi
+fi
+probe_hosts=( $(printf '%s
+' "${probe_hosts[@]}" | awk '!seen[$0]++') )
+echo "[INFO] Probing Odysseus endpoint candidates: ${probe_hosts[*]}"
+
+while true; do
+    reached_host=""
+    for probe_host in "${probe_hosts[@]}"; do
+        if curl -sS --connect-timeout 2 --max-time 4 -f "http://${probe_host}:7000" > /dev/null 2>&1; then
+            reached_host="$probe_host"
+            break
+        fi
+    done
+
+    if [ -n "$reached_host" ]; then
+        break
+    fi
+
     COUNT=$((COUNT+2))
     printf '.'
     if [ $((COUNT % 10)) -eq 0 ]; then
@@ -619,7 +645,7 @@ until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/
     sleep 2
 done
 echo ""
-print_ok "Application socket online after ${COUNT}s."
+print_ok "Application socket online at http://${reached_host}:7000 after ${COUNT}s."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
