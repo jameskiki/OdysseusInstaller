@@ -193,3 +193,49 @@ The script resolves Ubuntu distro names dynamically, supporting `Ubuntu` and `Ub
 ## 5. Notes on Upstream GPU Overlay Paths
 
 Current installer automation uses `docker-compose.gpu-nvidia.yml` when NVIDIA support is detected. If upstream overlay conventions change, update both bootstrap behavior and docs together in the same release.
+
+---
+
+## 6. GitHub Actions Build/Test/Release Workflow
+
+CI and release automation is implemented in a single workflow file:
+
+- `.github/workflows/release-installer.yml`
+
+### Triggers
+
+- `push` on any branch: CI build for feature branches.
+- `pull_request`: CI build for PR validation.
+- `push` tags matching `v*`: release build and publish.
+- `workflow_dispatch`: manual run with optional `version` input.
+
+### Build mode resolution
+
+The workflow determines mode from Git ref and input:
+
+- Tag ref starting with `v`: release mode.
+- Non-tag with manual `version`: CI mode with explicit version.
+- Non-tag without manual `version`: CI mode with generated version `0.0.0-ci.<run_number>`.
+
+The selected version is written into `installer/installer.iss` (`AppVersion=...`) before compiling.
+
+### Outputs by mode
+
+Release mode (`v*` tags):
+
+- Creates `OdysseusSetup-<version>.exe`.
+- Creates `OdysseusSetup-<version>.exe.sha256`.
+- Publishes both files to a GitHub Release.
+
+CI mode (branches, PRs, non-tag manual runs):
+
+- Creates the same `.exe` and `.sha256` files.
+- Uploads both as a workflow artifact named `odysseus-installer-<version>`.
+- Does not create a GitHub Release.
+
+### Practical testing flow for feature branches
+
+1. Push a commit to the feature branch.
+2. Wait for the Actions run to complete.
+3. Download the artifact from the run summary.
+4. Extract and test the installer executable.

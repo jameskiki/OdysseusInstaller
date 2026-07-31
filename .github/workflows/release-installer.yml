@@ -2,38 +2,57 @@ name: Build and Release Installer
 
 on:
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version override for manual non-tag runs (e.g. 1.2.3-rc.1)"
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  build-installer:
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Parse tag version and sync installer metadata
-        id: version
+      - name: Resolve build mode and sync installer metadata
+        id: meta
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag) {
-            throw "Could not determine tag from github.ref_name"
-          }
+          $refType = "${{ github.ref_type }}"
+          $refName = "${{ github.ref_name }}"
+          $runNumber = "${{ github.run_number }}"
+          $manualVersion = "${{ github.event.inputs.version }}"
 
-          if ($tag.StartsWith("v")) {
-            $version = $tag.Substring(1)
-          } else {
-            $version = $tag
+          $isRelease = $false
+          $version = $null
+          $releaseTag = ''
+
+          if (($refType -eq 'tag') -and $refName.StartsWith('v')) {
+            $isRelease = $true
+            $releaseTag = $refName
+            $version = $refName.Substring(1)
+          }
+          elseif (-not [string]::IsNullOrWhiteSpace($manualVersion)) {
+            $version = $manualVersion
+          }
+          else {
+            # CI-only builds get a deterministic prerelease version.
+            $version = "0.0.0-ci.$runNumber"
           }
 
           if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z\.]+)?$') {
-            throw "Tag '$tag' is not a valid version. Expected v<major>.<minor>.<patch> (optional pre-release suffix)."
+            throw "Version '$version' is invalid. Expected <major>.<minor>.<patch> with optional suffix (example: 1.2.3-rc.1)."
           }
 
           $issPath = Join-Path $PWD 'installer\installer.iss'
@@ -45,6 +64,8 @@ jobs:
           Set-Content -Path $issPath -Value $updatedContent -Encoding ascii
 
           "version=$version" >> $env:GITHUB_OUTPUT
+          "is_release=$($isRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
 
       - name: Compile Inno Setup script
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
@@ -55,8 +76,7 @@ jobs:
         id: vars
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $version = "${{ steps.version.outputs.version }}"
+          $version = "${{ steps.meta.outputs.version }}"
 
           $searchRoots = @("Output", "installer/Output")
           $builtExe = Get-ChildItem -Path $searchRoots -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue |
@@ -75,17 +95,27 @@ jobs:
           $hashFile = "$releaseExe.sha256"
           "$hash  $releaseExe" | Set-Content -Path $hashFile -Encoding ascii
 
-          $isPrerelease = if ($tag -match "-(alpha|beta|rc)(\.|\d|$)") { "true" } else { "false" }
+          $isPrerelease = if ($version -match "-(alpha|beta|rc)(\.|\d|$)") { "true" } else { "false" }
 
           "version=$version" >> $env:GITHUB_OUTPUT
           "release_exe=$releaseExe" >> $env:GITHUB_OUTPUT
           "release_sha=$hashFile" >> $env:GITHUB_OUTPUT
           "prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
 
+      - name: Upload CI artifacts
+        if: steps.meta.outputs.is_release != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: odysseus-installer-${{ steps.vars.outputs.version }}
+          path: |
+            ${{ steps.vars.outputs.release_exe }}
+            ${{ steps.vars.outputs.release_sha }}
+
       - name: Create GitHub release and upload assets
+        if: steps.meta.outputs.is_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.meta.outputs.release_tag }}
           generate_release_notes: true
           prerelease: ${{ steps.vars.outputs.prerelease }}
           files: |

@@ -68,6 +68,42 @@ If launch fails during the Ollama reachability audit, run the **Odysseus Health 
 
 ---
 
+## CI Build and Release Workflow
+
+GitHub Actions for this repository is handled by a single workflow: `.github/workflows/release-installer.yml`.
+
+### Feature branch and PR testing (no release required)
+
+- Trigger: push to any branch or update/open a pull request.
+- Behavior: compiles the installer and uploads CI artifacts.
+- Output artifact name: `odysseus-installer-<version>`
+- Artifact contents:
+	- `OdysseusSetup-<version>.exe`
+	- `OdysseusSetup-<version>.exe.sha256`
+
+How to test a feature branch:
+
+1. Push your branch.
+2. Open the Actions run named **Build and Release Installer**.
+3. Download the uploaded artifact.
+4. Unzip and run the `.exe`.
+
+### Release builds (tag-driven)
+
+- Trigger: push a tag matching `v*` (example: `v1.2.3` or `v1.2.3-rc.1`).
+- Behavior: compiles installer, computes SHA256, and creates a GitHub Release with assets.
+- Release assets:
+	- `OdysseusSetup-<version>.exe`
+	- `OdysseusSetup-<version>.exe.sha256`
+
+### Manual runs
+
+- Trigger: **Run workflow** (`workflow_dispatch`) from the Actions UI.
+- Optional input: `version` (for non-tag/manual runs).
+- If no manual version is provided and the run is not a tag release, CI uses an internal version format: `0.0.0-ci.<run_number>`.
+
+---
+
 ## Repository Layout
 
 | Path | Purpose |
@@ -85,3 +121,4 @@ If launch fails during the Ollama reachability audit, run the **Odysseus Health 
 - [Odysseus AI Workspace Guide](docs/odysseus-workspace-guide.md) — What Odysseus is and how to use it
 - [Technical Reference](docs/technical-reference.md) — How the installer works under the hood
 - [Release Doc Parity Checklist](docs/release-doc-parity-checklist.md) — Pre-release checklist to keep docs aligned with code
+- [Release Day Checklist](docs/release-day-checklist.md) — Step-by-step test and publish runbook
