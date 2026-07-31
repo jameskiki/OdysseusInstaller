@@ -104,17 +104,29 @@ function Ensure-UbuntuInitialized {
 }
 
 function Ensure-WslSystemdEnabled {
-    # Check first: is systemd=true already set under [boot] in /etc/wsl.conf?
-    # We use a small, single-line bash invocation so nothing depends on stdin,
-    # here-strings, base64, CRLF handling, or PowerShell native-exe arg quoting.
-    & wsl.exe -d $WslDistro -u root -- bash -c "grep -qiE '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true[[:space:]]*$' /etc/wsl.conf 2>/dev/null"
-    if ($LASTEXITCODE -eq 0) {
-        return
-    }
+    $configCheckAwk = @'
+BEGIN { in_boot = 0; enabled = 0 }
+/^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+  in_boot = ($0 ~ /^[[:space:]]*\[boot\][[:space:]]*$/) ? 1 : 0
+  next
+}
+in_boot && /^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?[[:space:]]*$/ {
+  enabled = 1
+}
+END { exit(enabled ? 0 : 1) }
+'@
+    $configCheckAwkOneLine = ($configCheckAwk -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
+    $configCheckCmd = "awk '$configCheckAwkOneLine' /etc/wsl.conf 2>/dev/null"
+    $runtimeCheckCmd = '[ "$(ps -p 1 -o comm= 2>/dev/null | tr -d "[:space:]")" = "systemd" ]'
 
-    # Not enabled — write /etc/wsl.conf via a single-line awk pipeline that is
-    # idempotent and handles all three cases (no file, [boot] present, [boot] absent).
-    $awkScript = @'
+    & wsl.exe -d $WslDistro -u root -- bash -c $configCheckCmd
+    $configAlreadyEnabled = ($LASTEXITCODE -eq 0)
+    $didRestartWsl = $false
+
+    if (-not $configAlreadyEnabled) {
+        # Not enabled — write /etc/wsl.conf via a single-line awk pipeline that is
+        # idempotent and handles all three cases (no file, [boot] present, [boot] absent).
+        $awkScript = @'
 BEGIN { in_boot = 0; boot_seen = 0; systemd_written = 0 }
 /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
   if (in_boot && !systemd_written) { print "systemd=true"; systemd_written = 1 }
@@ -132,17 +144,37 @@ END {
   if (!boot_seen) { print ""; print "[boot]"; print "systemd=true" }
 }
 '@
-    $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
-    $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
+        $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
+        $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
 
-    & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
+        & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
+        }
+
+        & wsl.exe -d $WslDistro -u root -- bash -c $configCheckCmd
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to verify /etc/wsl.conf systemd configuration after update."
+        }
+
+        $env:ODYSSEUS_WSL_RESTART_REQUIRED = '1'
+        & wsl.exe --shutdown | Out-Null
+        Start-Sleep -Seconds 2
+        $didRestartWsl = $true
     }
 
-    $env:ODYSSEUS_WSL_RESTART_REQUIRED = '1'
-    & wsl.exe --shutdown | Out-Null
-    Start-Sleep -Seconds 2
+    & wsl.exe -d $WslDistro -- bash -lc $runtimeCheckCmd
+    if ($LASTEXITCODE -ne 0 -and -not $didRestartWsl) {
+        $env:ODYSSEUS_WSL_RESTART_REQUIRED = '1'
+        & wsl.exe --shutdown | Out-Null
+        Start-Sleep -Seconds 2
+        $didRestartWsl = $true
+        & wsl.exe -d $WslDistro -- bash -lc $runtimeCheckCmd
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "WSL did not start with systemd as PID 1 after configuration and restart. Ensure your WSL version supports systemd, then rerun Odysseus."
+    }
 }
 
 function Get-OllamaCommand {
