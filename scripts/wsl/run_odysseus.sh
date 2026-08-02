@@ -199,6 +199,7 @@ probe_ollama_host() {
 
 resolve_windows_ollama_host() {
     local candidate
+    local windows_default_route_ipv4
     local candidates=()
     local failure_reason
 
@@ -209,6 +210,22 @@ resolve_windows_ollama_host() {
     # Allow advanced users to force a known-good host endpoint explicitly.
     if [ -n "${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}" ]; then
         candidates+=("${ODYSSEUS_WINDOWS_HOST_OVERRIDE}")
+    fi
+
+    # Prefer the Windows adapter used for the default route when available.
+    windows_default_route_ipv4=$(powershell.exe -NoProfile -Command "\
+\$route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |\
+    Where-Object { \$_.State -eq 'Alive' -and \$_.NextHop -ne '0.0.0.0' } |\
+    Sort-Object RouteMetric, InterfaceMetric |\
+    Select-Object -First 1;\
+if (\$route) {\
+    Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex \$route.InterfaceIndex -ErrorAction SilentlyContinue |\
+        Where-Object { \$_.IPAddress -notmatch '^127\\.' -and \$_.IPAddress -notmatch '^169\\.254\\.' -and \$_.PrefixOrigin -ne 'WellKnown' } |\
+        Sort-Object SkipAsSource |\
+        Select-Object -First 1 -ExpandProperty IPAddress\
+}" 2>/dev/null | tr -d '\r' | head -n 1)
+    if [ -n "$windows_default_route_ipv4" ]; then
+        candidates+=("$windows_default_route_ipv4")
     fi
 
     # WSL's synthetic DNS server can be the right bridge on some setups.

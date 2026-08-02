@@ -443,7 +443,7 @@ function Test-OdysseusRuntimeHealth {
             }
 
             $probe = Test-OdysseusWslOllamaCandidate -WslDistro $WslDistro -Host $candidate.Value -TimeoutSec 3
-            if ($probe.ExitCode -eq 0) {
+            if ($probe.Success) {
                 $reachableVia = "{0} [{1}]" -f $candidate.Value, $candidate.Source
                 break
             }
