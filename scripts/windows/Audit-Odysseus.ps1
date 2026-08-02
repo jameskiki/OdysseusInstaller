@@ -7,7 +7,7 @@
     Checks key runtime layers and reports PASS/WARN/FAIL status:
     - Ollama process, listener, and localhost endpoint
     - WSL availability and host routing
-    - .env model endpoint keys in ~/odysseus/.env
+    - Runtime model endpoint keys in ~/.odysseus/runtime.env (fallback: ~/odysseus/.env)
     - Docker daemon and compose container status
     - Odysseus HTTP endpoint on port 7000
 
@@ -57,6 +57,33 @@ function Write-Section {
 function Invoke-Wsl {
     param([string]$Command)
     & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
+}
+
+function Invoke-WslCompose {
+        param(
+                [string]$ComposeArgs,
+                [switch]$UseSudo
+        )
+
+        $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+        $command = @'
+cd ~/odysseus 2>/dev/null || exit 1
+runtime_env="$HOME/.odysseus/runtime.env"
+compose_args=()
+if [ -f "$runtime_env" ]; then
+    compose_args+=(--env-file "$runtime_env")
+    compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ -n "$compose_files" ]; then
+        IFS=':' read -r -a cf <<< "$compose_files"
+        for f in "${cf[@]}"; do
+            [ -n "$f" ] && compose_args+=(-f "$f")
+        done
+    fi
+fi
+__SUDO__docker compose "${compose_args[@]}" __ARGS__
+'@
+
+        Invoke-Wsl ($command.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs))
 }
 
 function Get-InstalledWslDistros {
@@ -112,13 +139,13 @@ else {
 
 $listeners = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue
 $allIface = $listeners | Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
-$loopbackOnly = $listeners | Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') }
+$loopbackOnly = $listeners | Where-Object { $_.LocalAddress -eq '127.0.0.1' }
 
 if ($allIface) {
     Write-Check -Name "Ollama bind scope" -Status PASS -Detail "Listening on all interfaces"
 }
 elseif ($loopbackOnly) {
-    Write-Check -Name "Ollama bind scope" -Status FAIL -Detail "Bound to loopback only (127.0.0.1/::1)."
+    Write-Check -Name "Ollama bind scope" -Status FAIL -Detail "Bound to loopback only (127.0.0.1)."
 }
 else {
     Write-Check -Name "Ollama bind scope" -Status WARN -Detail "No listener detected on port 11434."
@@ -150,34 +177,12 @@ else {
         else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-            $candidates = [System.Collections.Generic.List[string]]::new()
-            if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
-                $candidates.Add($gatewayIp)
-            }
-            $candidates.Add('host.docker.internal')
-
-            $reachableVia = $null
-            $attempted = [System.Collections.Generic.List[string]]::new()
-            $seen = @{}
-            foreach ($candidate in $candidates) {
-                if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-                if ($seen.ContainsKey($candidate)) { continue }
-                $seen[$candidate] = $true
-                $attempted.Add($candidate)
-
-                $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${candidate}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
-                if (($reach -join '').Trim() -eq 'OK') {
-                    $reachableVia = $candidate
-                    break
-                }
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
-                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reachableVia)
+            $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
+            if (($reach -join '').Trim() -eq 'OK') {
+                Write-Check -Name "Ollama reachable from WSL" -Status PASS
             }
             else {
-                $attemptedText = if ($attempted.Count -gt 0) { $attempted -join ', ' } else { 'none' }
-                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}." -f $attemptedText)
+                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl http://{0}:11434/api/tags failed from WSL." -f $gatewayIp)
             }
         }
     }
@@ -189,21 +194,21 @@ else {
 Write-Section "3) Environment and containers"
 
 if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
-    $envLines = Invoke-Wsl 'cat ~/odysseus/.env 2>/dev/null'
+    $envLines = Invoke-Wsl 'if [ -f ~/.odysseus/runtime.env ]; then cat ~/.odysseus/runtime.env; else cat ~/odysseus/.env 2>/dev/null; fi'
     if ($null -eq $envLines -or ($envLines -join '').Trim().Length -eq 0) {
-        Write-Check -Name ".env present" -Status WARN -Detail "~/odysseus/.env not found or empty."
+        Write-Check -Name "Runtime env present" -Status WARN -Detail "Neither ~/.odysseus/runtime.env nor ~/odysseus/.env was found with content."
     }
     else {
-        Write-Check -Name ".env present" -Status PASS
+        Write-Check -Name "Runtime env present" -Status PASS
 
         $requiredKeys = @('LLM_HOST', 'LLM_HOSTS', 'OLLAMA_BASE_URL', 'EMBEDDING_URL')
         foreach ($key in $requiredKeys) {
             $line = $envLines | Where-Object { $_ -match ("^{0}=" -f [regex]::Escape($key)) } | Select-Object -Last 1
             if ($line) {
-                Write-Check -Name (".env key {0}" -f $key) -Status PASS
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status PASS
             }
             else {
-                Write-Check -Name (".env key {0}" -f $key) -Status WARN -Detail "Key is missing."
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status WARN -Detail "Key is missing."
             }
         }
     }
@@ -214,11 +219,11 @@ if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
     if ($dockerRunning -eq 'RUNNING') {
         Write-Check -Name "Docker daemon (WSL)" -Status PASS
 
-        $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; docker compose ps -a 2>/dev/null'
+        $composePs = Invoke-WslCompose -ComposeArgs 'ps -a'
         if (-not $composePs -or ($composePs -join '').Trim().Length -eq 0) {
             # Fallback for environments where docker requires sudo. Use -n to avoid
             # interactive password prompts during health checks.
-            $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; sudo -n docker compose ps -a 2>/dev/null'
+            $composePs = Invoke-WslCompose -ComposeArgs 'ps -a' -UseSudo
         }
 
         $rows = @($composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })

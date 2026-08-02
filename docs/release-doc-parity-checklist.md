@@ -30,9 +30,12 @@ Use this checklist before creating or publishing a release tag.
 
 - Verify docs cover current env/compose behavior:
   - dynamic Windows host endpoint resolution
-  - `.env` upsert helper approach
-  - host-mode override compose file generation
+  - runtime env path `~/.odysseus/runtime.env`
+  - `COMPOSE_FILE` written to runtime env with absolute compose paths
+  - host-mode override compose file generation at `~/.odysseus/docker-compose.host-mode.override.yml`
+  - compose invocation using explicit `--env-file` and `-f` args from runtime profile
   - first-boot password capture file and fallback handling
+- Verify docs mention dirty-working-tree protection before git sync in `~/odysseus`.
 - Verify apt update strategy is represented accurately (retry/timeouts wrapper).
 - Verify documented helper functions exist and are current.
 
@@ -40,6 +43,7 @@ Use this checklist before creating or publishing a release tag.
 
 - Verify `scripts/windows/Audit-Odysseus.ps1` is listed and documented.
 - Verify audit behavior around Ubuntu distro detection reflects current script.
+- Verify audit docs mention runtime key checks from `~/.odysseus/runtime.env` with fallback to `~/odysseus/.env`.
 
 ## Documentation hygiene
 
