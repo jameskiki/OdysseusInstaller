@@ -24,6 +24,18 @@ param (
 $ErrorActionPreference = 'SilentlyContinue'
 $WslDistro = $null
 
+$ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$RuntimeChecksModulePath = Join-Path $ScriptRoot 'lib\Odysseus.RuntimeChecks.psm1'
+if (-not (Test-Path $RuntimeChecksModulePath)) {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required audit files."
+}
+try {
+    Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
+}
+catch {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required audit files."
+}
+
 $script:results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $script:failCount = 0
 $script:warnCount = 0
@@ -56,39 +68,15 @@ function Write-Section {
 
 function Invoke-Wsl {
     param([string]$Command)
-    & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
+
+    $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $Command
+    return @($result.Output)
 }
 
 function Test-WslOllamaCandidate {
     param([string]$Host)
 
-    $probe = @'
-tmp="$(mktemp 2>/dev/null || echo /tmp/odysseus_audit_$$.log)"
-http_code="$(curl --noproxy "*" -sS -o /dev/null -w "%{http_code}" --max-time 5 "http://__HOST__:11434/api/tags" 2>"$tmp")"
-curl_exit=$?
-err="$(tr '\n' ' ' <"$tmp" 2>/dev/null | sed 's/[[:space:]]\\+/ /g' | sed 's/^ //; s/ $//')"
-rm -f "$tmp" 2>/dev/null
-if [ $curl_exit -eq 0 ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
-    echo "OK|$http_code"
-else
-    [ -z "$err" ] && err="curl_exit_${curl_exit}_http_${http_code}"
-    echo "FAIL|$http_code|$curl_exit|$err"
-fi
-'@
-
-    $output = Invoke-Wsl ($probe.Replace('__HOST__', $Host))
-    $line = ($output -join '').Trim()
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        $line = 'FAIL||255|no_output'
-    }
-
-    $parts = $line -split '\|', 4
-    [PSCustomObject]@{
-        Success  = ($parts[0] -eq 'OK')
-        HttpCode = if ($parts.Count -ge 2) { $parts[1] } else { '' }
-        ExitCode = if ($parts.Count -ge 3) { $parts[2] } else { '' }
-        Detail   = if ($parts.Count -ge 4) { $parts[3] } else { '' }
-    }
+    return (Test-OdysseusWslOllamaCandidate -WslDistro $WslDistro -Host $Host -TimeoutSec 5)
 }
 
 function Invoke-WslCompose {
@@ -97,40 +85,18 @@ function Invoke-WslCompose {
                 [switch]$UseSudo
         )
 
-        $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
-        $command = @'
-cd ~/odysseus 2>/dev/null || exit 1
-runtime_env="$HOME/.odysseus/runtime.env"
-compose_args=()
-if [ -f "$runtime_env" ]; then
-    compose_args+=(--env-file "$runtime_env")
-    compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
-    if [ -n "$compose_files" ]; then
-        IFS=':' read -r -a cf <<< "$compose_files"
-        for f in "${cf[@]}"; do
-            [ -n "$f" ] && compose_args+=(-f "$f")
-        done
-    fi
-fi
-__SUDO__docker compose "${compose_args[@]}" __ARGS__
-'@
-
-        Invoke-Wsl ($command.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs))
+        $result = Invoke-OdysseusWslCompose -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo
+        return @($result.Output)
 }
 
 function Get-InstalledWslDistros {
-    $distros = (& wsl.exe -l -q 2>$null)
-    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return @(Get-OdysseusInstalledWslDistros)
 }
 
 function Resolve-UbuntuDistro {
     param([string[]]$Distros)
 
-    if ($Distros -contains 'Ubuntu') {
-        return 'Ubuntu'
-    }
-
-    return ($Distros | Where-Object { $_ -match '^Ubuntu(-.*)?$' } | Select-Object -First 1)
+    return (Resolve-OdysseusUbuntuDistro -Distros $Distros)
 }
 
 function Test-HttpOk {
@@ -139,13 +105,7 @@ function Test-HttpOk {
         [int]$TimeoutSec = 5
     )
 
-    try {
-        $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
-    }
-    catch {
-        return $false
-    }
+    return (Test-OdysseusHttpEndpoint -Uri $Uri -TimeoutSec $TimeoutSec)
 }
 
 Clear-Host
@@ -183,15 +143,23 @@ else {
     Write-Check -Name "Ollama bind scope" -Status WARN -Detail "No listener detected on port 11434."
 }
 
-$bridgeRule = Get-NetFirewallRule -DisplayName 'Odysseus Ollama WSL Bridge' -ErrorAction SilentlyContinue
-if ($bridgeRule -and $bridgeRule.Enabled -eq 'True') {
-    Write-Check -Name "Ollama WSL firewall bridge rule" -Status PASS
-}
-elseif ($bridgeRule) {
-    Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule exists but is disabled."
-}
-else {
-    Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule not found. WSL -> Windows host traffic on 11434 may be blocked."
+$bridgeRule = Get-OdysseusFirewallRuleStatus -DisplayName 'Odysseus Ollama WSL Bridge'
+switch ($bridgeRule.Status) {
+    'Enabled' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status PASS
+    }
+    'Disabled' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule exists but is disabled."
+    }
+    'AccessDenied' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail $bridgeRule.Detail
+    }
+    'NotFound' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule not found. WSL -> Windows host traffic on 11434 may be blocked."
+    }
+    default {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Firewall rule state could not be verified: $($bridgeRule.Detail)"
+    }
 }
 
 Write-Section "2) WSL routing and host reachability"
@@ -220,39 +188,23 @@ else {
         else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-            $candidates = [System.Collections.Generic.List[string]]::new()
-            if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
-                $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
-            }
-
-            $resolverCandidate = ((Invoke-Wsl "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf 2>/dev/null") | Select-Object -First 1).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($resolverCandidate)) {
-                $candidates.Add($resolverCandidate)
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
-                $candidates.Add($gatewayIp)
-            }
-            $candidates.Add('host.docker.internal')
+            $candidates = @(Get-OdysseusOllamaCandidates -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
 
             $reachableVia = $null
             $attempted = [System.Collections.Generic.List[string]]::new()
             $attemptDetails = [System.Collections.Generic.List[string]]::new()
-            $seen = @{}
             foreach ($candidate in $candidates) {
-                if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-                if ($seen.ContainsKey($candidate)) { continue }
-                $seen[$candidate] = $true
-                $attempted.Add($candidate)
+                if ([string]::IsNullOrWhiteSpace($candidate.Value)) { continue }
+                $attempted.Add($candidate.Value)
 
-                $probe = Test-WslOllamaCandidate -Host $candidate
+                $probe = Test-WslOllamaCandidate -Host $candidate.Value
                 if ($probe.Success) {
-                    $reachableVia = $candidate
+                    $reachableVia = "{0} [{1}]" -f $candidate.Value, $candidate.Source
                     break
                 }
 
                 $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
-                $attemptDetails.Add(("{0} (http={1}, curl_exit={2}, detail={3})" -f $candidate, $probe.HttpCode, $probe.ExitCode, $detail))
+                $attemptDetails.Add(("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail))
             }
 
             if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
@@ -298,33 +250,27 @@ if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
     if ($dockerRunning -eq 'RUNNING') {
         Write-Check -Name "Docker daemon (WSL)" -Status PASS
 
-        $composePs = Invoke-WslCompose -ComposeArgs 'ps -a'
-        if (-not $composePs -or ($composePs -join '').Trim().Length -eq 0) {
-            # Fallback for environments where docker requires sudo. Use -n to avoid
-            # interactive password prompts during health checks.
-            $composePs = Invoke-WslCompose -ComposeArgs 'ps -a' -UseSudo
-        }
-
-        $rows = @($composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
-        if ($rows.Count -gt 0) {
-            foreach ($row in $rows) {
-                $container = ($row.Trim() -split '\s+')[0]
-                if ($row -match '\bExit') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status FAIL -Detail "Exited"
-                }
-                elseif ($row -match '\(unhealthy\)') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail "Up (unhealthy)"
-                }
-                elseif ($row -match '\bUp\b') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status PASS -Detail "Up"
-                }
-                else {
-                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail "Unknown status"
-                }
-            }
+        $states = Get-OdysseusComposeServiceStates -WslDistro $WslDistro
+        if ($states.Count -eq 0) {
+            Write-Check -Name "Odysseus containers" -Status WARN -Detail "Container list unavailable (docker permissions or no compose services under ~/odysseus)."
         }
         else {
-            Write-Check -Name "Odysseus containers" -Status WARN -Detail "Container list unavailable (docker permissions or no compose services under ~/odysseus)."
+            foreach ($container in ($states.Keys | Sort-Object)) {
+                $state = $states[$container].State
+                $health = $states[$container].Health
+
+                if ($state -ne 'running') {
+                    Write-Check -Name ("Container {0}" -f $container) -Status FAIL -Detail ("State: {0}" -f $state)
+                    continue
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($health) -and $health -ne 'healthy') {
+                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail ("Running but health is '{0}'" -f $health)
+                    continue
+                }
+
+                Write-Check -Name ("Container {0}" -f $container) -Status PASS -Detail "Up"
+            }
         }
     }
     else {
@@ -360,15 +306,23 @@ if ($CheckLanReachability) {
         Write-Check -Name "Port 7000 LAN bind" -Status WARN -Detail "No listener on port 7000."
     }
 
-    $fw = Get-NetFirewallRule -DisplayName 'Odysseus AI Network Host' -ErrorAction SilentlyContinue
-    if ($fw -and $fw.Enabled -eq 'True') {
-        Write-Check -Name "Firewall rule for port 7000" -Status PASS
-    }
-    elseif ($fw) {
-        Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule exists but is disabled."
-    }
-    else {
-        Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule not found."
+    $fw = Get-OdysseusFirewallRuleStatus -DisplayName 'Odysseus AI Network Host'
+    switch ($fw.Status) {
+        'Enabled' {
+            Write-Check -Name "Firewall rule for port 7000" -Status PASS
+        }
+        'Disabled' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule exists but is disabled."
+        }
+        'AccessDenied' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail $fw.Detail
+        }
+        'NotFound' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule not found."
+        }
+        default {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Firewall rule state could not be verified: $($fw.Detail)"
+        }
     }
 }
 

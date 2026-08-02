@@ -5,6 +5,18 @@ param(
 Clear-Host
 $ErrorActionPreference = 'Stop'
 
+$ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$RuntimeChecksModulePath = Join-Path $ScriptRoot 'lib\Odysseus.RuntimeChecks.psm1'
+if (-not (Test-Path $RuntimeChecksModulePath)) {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required launcher files."
+}
+try {
+    Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
+}
+catch {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required launcher files."
+}
+
 # Capture a transcript of this launch to a per-user log for post-mortem debugging.
 $LogDir = Join-Path $env:LOCALAPPDATA 'Odysseus\Logs'
 try {
@@ -84,18 +96,11 @@ $WatchdogIntervalSec = 10
 $RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
 
 function Get-InstalledWslDistros {
-    $distros = & wsl.exe -l -q 2>$null
-    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return @(Get-OdysseusInstalledWslDistros)
 }
 
 function Resolve-UbuntuDistro {
-    $distros = Get-InstalledWslDistros
-
-    if ($distros -contains 'Ubuntu') {
-        return 'Ubuntu'
-    }
-
-    $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1
+    $ubuntuVariant = Resolve-OdysseusUbuntuDistro -Distros (Get-InstalledWslDistros)
     if (-not $ubuntuVariant) {
         throw "No Ubuntu WSL distribution was found. Run the 'Prepare WSL for Odysseus' shortcut first. It installs Ubuntu with 'wsl --install -d Ubuntu' and guides first-run setup. Then rerun Odysseus."
     }
@@ -353,33 +358,30 @@ function Ensure-OllamaEndpoint {
 function Ensure-OllamaFirewallBridge {
     $ruleName = 'Odysseus Ollama WSL Bridge'
 
-    try {
-        $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-        if ($null -eq $existing) {
-            Write-Host "[WARN] Firewall rule '$ruleName' is not configured. The installer should configure this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
-            return
+    $status = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
+    switch ($status.Status) {
+        'Enabled' {
+            Write-Host "[INFO] Firewall rule '$ruleName' is configured and enabled." -ForegroundColor DarkGray
         }
-
-        if ($existing.Enabled -ne 'True') {
+        'Disabled' {
             Write-Host "[WARN] Firewall rule '$ruleName' exists but is disabled. The installer should enable this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
-            return
         }
-
-        Write-Host "[INFO] Firewall rule '$ruleName' is configured and enabled." -ForegroundColor DarkGray
-    }
-    catch {
-        Write-Host "[WARN] Could not verify firewall rule '$ruleName'. If WSL cannot reach Ollama, rerun the installer to reapply firewall configuration." -ForegroundColor Yellow
+        'AccessDenied' {
+            Write-Host "[WARN] $($status.Detail)" -ForegroundColor Yellow
+        }
+        'NotFound' {
+            Write-Host "[WARN] Firewall rule '$ruleName' is not configured. The installer should configure this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
+        }
+        default {
+            Write-Host "[WARN] Could not verify firewall rule '$ruleName'. $($status.Detail)" -ForegroundColor Yellow
+        }
     }
 }
 
 function Invoke-WslCommand {
     param([string]$Command)
 
-    $output = & wsl.exe -d $WslDistro -- bash -lc $Command 2>$null
-    return [PSCustomObject]@{
-        ExitCode = $LASTEXITCODE
-        Output = @($output)
-    }
+    return Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $Command -LoginShell
 }
 
 function Test-HttpEndpoint {
@@ -388,61 +390,15 @@ function Test-HttpEndpoint {
         [int]$TimeoutSec = 3
     )
 
-    try {
-        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
-    }
-    catch {
-        return $false
-    }
+    return (Test-OdysseusHttpEndpoint -Uri $Uri -TimeoutSec $TimeoutSec)
 }
 
 function Get-WslGatewayIp {
-    $route = Invoke-WslCommand -Command "ip route show default 2>/dev/null | head -n 1"
-    if ($route.ExitCode -ne 0) {
-        return $null
-    }
-
-    $routeLine = ($route.Output | Select-Object -First 1).Trim()
-    if ($routeLine -match 'default\s+via\s+(\S+)') {
-        return $matches[1]
-    }
-
-    return $null
+    return (Get-OdysseusWslGatewayIp -WslDistro $WslDistro)
 }
 
 function Get-WslOllamaCandidates {
-    $candidates = [System.Collections.Generic.List[string]]::new()
-
-    if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
-        $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE.Trim())
-    }
-
-    $gatewayIp = Get-WslGatewayIp
-    if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
-        $candidates.Add($gatewayIp)
-    }
-
-    $dnsHost = Invoke-WslCommand -Command "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf 2>/dev/null"
-    if ($dnsHost.ExitCode -eq 0) {
-        $resolved = (($dnsHost.Output | Select-Object -First 1) -as [string]).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($resolved)) {
-            $candidates.Add($resolved)
-        }
-    }
-
-    $candidates.Add('host.docker.internal')
-
-    $unique = [System.Collections.Generic.List[string]]::new()
-    $seen = @{}
-    foreach ($candidate in $candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        if ($seen.ContainsKey($candidate)) { continue }
-        $seen[$candidate] = $true
-        $unique.Add($candidate)
-    }
-
-    return @($unique)
+    return @(Get-OdysseusOllamaCandidates -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
 }
 
 function Invoke-WslComposeCommand {
@@ -451,64 +407,18 @@ function Invoke-WslComposeCommand {
         [switch]$UseSudo
     )
 
-    $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
-    $script = @'
-cd ~/odysseus 2>/dev/null || exit 1
-runtime_env="$HOME/.odysseus/runtime.env"
-compose_args=()
-if [ -f "$runtime_env" ]; then
-  compose_args+=(--env-file "$runtime_env")
-  compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
-  if [ -n "$compose_files" ]; then
-    IFS=':' read -r -a cf <<< "$compose_files"
-    for f in "${cf[@]}"; do
-      [ -n "$f" ] && compose_args+=(-f "$f")
-    done
-  fi
-fi
-__SUDO__docker compose "${compose_args[@]}" __ARGS__
-'@
-
-    $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs)
-    return Invoke-WslCommand -Command $command
+        return Invoke-OdysseusWslCompose -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo
 }
 
 function Get-ComposeServiceStates {
-    $result = Invoke-WslComposeCommand -ComposeArgs "ps --format '{{.Service}}|{{.State}}|{{.Health}}'"
-    if ($result.ExitCode -ne 0) {
-        # Fallback for environments that still require sudo, but keep it non-interactive.
-        $result = Invoke-WslComposeCommand -ComposeArgs "ps --format '{{.Service}}|{{.State}}|{{.Health}}'" -UseSudo
-    }
-    if ($result.ExitCode -ne 0) {
-        return @{}
-    }
-
-    $states = @{}
-    foreach ($line in $result.Output) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-        $parts = $line -split '\|', 3
-        if ($parts.Count -lt 2) { continue }
-
-        $service = $parts[0].Trim()
-        $state = $parts[1].Trim().ToLowerInvariant()
-        $health = if ($parts.Count -ge 3) { $parts[2].Trim().ToLowerInvariant() } else { '' }
-
-        if (-not [string]::IsNullOrWhiteSpace($service)) {
-            $states[$service] = [PSCustomObject]@{
-                State = $state
-                Health = $health
-            }
-        }
-    }
-
-    return $states
+    return Get-OdysseusComposeServiceStates -WslDistro $WslDistro
 }
 
 function Test-OdysseusRuntimeHealth {
     param([string[]]$RequiredServices)
 
     $issues = [System.Collections.Generic.List[string]]::new()
+    $observations = [System.Collections.Generic.List[string]]::new()
 
     $wslCheck = Invoke-WslCommand -Command "id -un >/dev/null 2>&1"
     if ($wslCheck.ExitCode -ne 0) {
@@ -528,13 +438,22 @@ function Test-OdysseusRuntimeHealth {
         $attempts = [System.Collections.Generic.List[string]]::new()
 
         foreach ($candidate in $ollamaCandidates) {
-            $probe = Invoke-WslCommand -Command "curl --noproxy '*' -sf --max-time 3 http://${candidate}:11434/api/tags >/dev/null 2>&1"
+            if ([string]::IsNullOrWhiteSpace($candidate.Value)) {
+                continue
+            }
+
+            $probe = Test-OdysseusWslOllamaCandidate -WslDistro $WslDistro -Host $candidate.Value -TimeoutSec 3
             if ($probe.ExitCode -eq 0) {
-                $reachableVia = $candidate
+                $reachableVia = "{0} [{1}]" -f $candidate.Value, $candidate.Source
                 break
             }
 
-            $attempts.Add("${candidate} (exit $($probe.ExitCode))")
+            $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
+            $attempts.Add("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
+            $observations.Add("Ollama reachable from WSL via $reachableVia.")
         }
 
         if ([string]::IsNullOrWhiteSpace($reachableVia)) {
@@ -576,6 +495,7 @@ function Test-OdysseusRuntimeHealth {
     return [PSCustomObject]@{
         Healthy = ($issues.Count -eq 0)
         Issues = @($issues)
+        Observations = @($observations)
         Summary = if ($issues.Count -eq 0) { 'HEALTHY' } else { ($issues -join ' ') }
     }
 }

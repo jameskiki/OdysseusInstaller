@@ -12,6 +12,7 @@ This document describes the current installer pipeline and runtime behavior for 
 | `scripts/windows/Launch-Odysseus.ps1` | Windows launcher/orchestration script |
 | `scripts/wsl/run_odysseus.sh` | Linux bootstrap script executed in WSL Ubuntu |
 | `scripts/windows/Audit-Odysseus.ps1` | Read-only health audit script for runtime diagnostics |
+| `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared read-only runtime checks consumed by launcher and audit to reduce drift |
 
 ---
 
@@ -201,6 +202,12 @@ On first boot:
 - Optional LAN exposure checks (`-CheckLanReachability`)
 
 The script resolves Ubuntu distro names dynamically, supporting `Ubuntu` and `Ubuntu-*` variants.
+
+The audit and launcher now share runtime-check primitives through `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` for:
+- WSL command invocation and distro discovery
+- Ollama host candidate resolution and probe diagnostics
+- Runtime compose state parsing
+- Firewall rule state normalization (including access-denied signaling)
 
 ---
 
