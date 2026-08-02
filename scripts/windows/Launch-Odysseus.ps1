@@ -263,12 +263,17 @@ function Ensure-OllamaAvailable {
         -StdErrPath $wingetErrLog
 
     # winget returns Win32/HRESULT-style codes that may surface as signed or unsigned.
-    # Normalize to UInt32 first to avoid false negatives on successful installs.
+    # Normalize via two's-complement bytes so negative Int32 values map to the same
+    # UInt32 bit pattern (for example, -1978335189 == 0x8A15002B).
     # 0x00000000 = installed
     # 0x8A15002B = no applicable upgrade / already installed
     # 0x8A150109 = install succeeded, reboot recommended
-    $exitCode = [uint32]$proc.ExitCode
-    $successCodes = @([uint32]0x00000000, [uint32]0x8A15002B, [uint32]0x8A150109)
+    $exitCode = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$proc.ExitCode), 0)
+    $successCodes = @(
+        [uint32]0,
+        [System.UInt32]::Parse('8A15002B', [System.Globalization.NumberStyles]::HexNumber),
+        [System.UInt32]::Parse('8A150109', [System.Globalization.NumberStyles]::HexNumber)
+    )
     if ($successCodes -notcontains $exitCode) {
         $tail = ''
         if (Test-Path $wingetLog) {
