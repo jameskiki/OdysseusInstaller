@@ -339,26 +339,20 @@ function Ensure-OllamaFirewallBridge {
 
     try {
         $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-        if ($existing) {
-            if ($existing.Enabled -ne 'True') {
-                Set-NetFirewallRule -DisplayName $ruleName -Enabled True -ErrorAction Stop | Out-Null
-            }
+        if ($null -eq $existing) {
+            Write-Host "[WARN] Firewall rule '$ruleName' is not configured. The installer should configure this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
             return
         }
 
-        New-NetFirewallRule `
-            -DisplayName $ruleName `
-            -Direction Inbound `
-            -Action Allow `
-            -Protocol TCP `
-            -LocalPort 11434 `
-            -Profile Any `
-            -ErrorAction Stop | Out-Null
+        if ($existing.Enabled -ne 'True') {
+            Write-Host "[WARN] Firewall rule '$ruleName' exists but is disabled. The installer should enable this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
+            return
+        }
 
-        Write-Host "[INFO] Added firewall rule '$ruleName' for TCP 11434." -ForegroundColor DarkGray
+        Write-Host "[INFO] Firewall rule '$ruleName' is configured and enabled." -ForegroundColor DarkGray
     }
     catch {
-        Write-Host "[WARN] Could not create/update firewall rule '$ruleName'. If WSL still cannot reach Ollama, run launcher as Administrator once or add an inbound allow rule for TCP 11434." -ForegroundColor Yellow
+        Write-Host "[WARN] Could not verify firewall rule '$ruleName'. If WSL cannot reach Ollama, rerun the installer to reapply firewall configuration." -ForegroundColor Yellow
     }
 }
 
