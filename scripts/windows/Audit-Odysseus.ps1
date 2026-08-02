@@ -59,6 +59,38 @@ function Invoke-Wsl {
     & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
 }
 
+function Test-WslOllamaCandidate {
+    param([string]$Host)
+
+    $probe = @'
+tmp="$(mktemp 2>/dev/null || echo /tmp/odysseus_audit_$$.log)"
+http_code="$(curl --noproxy "*" -sS -o /dev/null -w "%{http_code}" --max-time 5 "http://__HOST__:11434/api/tags" 2>"$tmp")"
+curl_exit=$?
+err="$(tr '\n' ' ' <"$tmp" 2>/dev/null | sed 's/[[:space:]]\\+/ /g' | sed 's/^ //; s/ $//')"
+rm -f "$tmp" 2>/dev/null
+if [ $curl_exit -eq 0 ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
+    echo "OK|$http_code"
+else
+    [ -z "$err" ] && err="curl_exit_${curl_exit}_http_${http_code}"
+    echo "FAIL|$http_code|$curl_exit|$err"
+fi
+'@
+
+    $output = Invoke-Wsl ($probe.Replace('__HOST__', $Host))
+    $line = ($output -join '').Trim()
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        $line = 'FAIL||255|no_output'
+    }
+
+    $parts = $line -split '\|', 4
+    [PSCustomObject]@{
+        Success  = ($parts[0] -eq 'OK')
+        HttpCode = if ($parts.Count -ge 2) { $parts[1] } else { '' }
+        ExitCode = if ($parts.Count -ge 3) { $parts[2] } else { '' }
+        Detail   = if ($parts.Count -ge 4) { $parts[3] } else { '' }
+    }
+}
+
 function Invoke-WslCompose {
         param(
                 [string]$ComposeArgs,
@@ -151,6 +183,17 @@ else {
     Write-Check -Name "Ollama bind scope" -Status WARN -Detail "No listener detected on port 11434."
 }
 
+$bridgeRule = Get-NetFirewallRule -DisplayName 'Odysseus Ollama WSL Bridge' -ErrorAction SilentlyContinue
+if ($bridgeRule -and $bridgeRule.Enabled -eq 'True') {
+    Write-Check -Name "Ollama WSL firewall bridge rule" -Status PASS
+}
+elseif ($bridgeRule) {
+    Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule exists but is disabled."
+}
+else {
+    Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule not found. WSL -> Windows host traffic on 11434 may be blocked."
+}
+
 Write-Section "2) WSL routing and host reachability"
 
 $hasWsl = $null -ne (Get-Command wsl.exe -ErrorAction SilentlyContinue)
@@ -185,6 +228,7 @@ else {
 
             $reachableVia = $null
             $attempted = [System.Collections.Generic.List[string]]::new()
+            $attemptDetails = [System.Collections.Generic.List[string]]::new()
             $seen = @{}
             foreach ($candidate in $candidates) {
                 if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -192,11 +236,14 @@ else {
                 $seen[$candidate] = $true
                 $attempted.Add($candidate)
 
-                $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${candidate}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
-                if (($reach -join '').Trim() -eq 'OK') {
+                $probe = Test-WslOllamaCandidate -Host $candidate
+                if ($probe.Success) {
                     $reachableVia = $candidate
                     break
                 }
+
+                $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
+                $attemptDetails.Add(("{0} (http={1}, curl_exit={2}, detail={3})" -f $candidate, $probe.HttpCode, $probe.ExitCode, $detail))
             }
 
             if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
@@ -204,7 +251,8 @@ else {
             }
             else {
                 $attemptedText = if ($attempted.Count -gt 0) { $attempted -join ', ' } else { 'none' }
-                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}." -f $attemptedText)
+                $detailText = if ($attemptDetails.Count -gt 0) { $attemptDetails -join '; ' } else { 'no candidate diagnostics available' }
+                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}. Details: {1}" -f $attemptedText, $detailText)
             }
         }
     }

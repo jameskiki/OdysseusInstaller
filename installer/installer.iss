@@ -37,6 +37,8 @@ Name: "{autodesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Para
 [Run]
 ; Allow inbound access for shared-host mode.
 Filename: "cmd.exe"; Parameters: "/c ""netsh.exe advfirewall firewall add rule name=""Odysseus AI Network Host"" dir=in action=allow protocol=TCP localport=7000 profile=private,domain || (echo Firewall configuration failed && pause)"""; StatusMsg: "Configuring network hosting permissions and firewall exceptions..."; Check: IsHostSelected
+; Allow WSL-to-Windows Ollama traffic for local deployments.
+Filename: "cmd.exe"; Parameters: "/c ""netsh.exe advfirewall firewall delete rule name=""Odysseus Ollama WSL Bridge"" 1>nul 2>nul & netsh.exe advfirewall firewall add rule name=""Odysseus Ollama WSL Bridge"" dir=in action=allow protocol=TCP localport=11434 profile=any || (echo Ollama firewall bridge configuration failed && pause)"""; StatusMsg: "Configuring Ollama WSL bridge firewall permissions..."; Check: IsLocalInstallation
 
 [Code]
 var
@@ -259,6 +261,7 @@ begin
     S := S + NewLine + 'Will be installed/configured:' + NewLine;
     S := S + '- Odysseus launcher and support scripts' + NewLine;
     S := S + '- Selected branch: ' + GetSelectedRepoRef + NewLine;
+    S := S + '- Firewall rule for inbound TCP 11434 (all profiles, WSL -> Ollama bridge)' + NewLine;
     if IsHostSelected then
       S := S + '- Firewall rule for inbound TCP 7000 (private/domain profiles)' + NewLine;
 
@@ -811,6 +814,8 @@ begin
   if CurUninstallStep = usPostUninstall then begin
     RunPowerShellHidden(
       'netsh.exe advfirewall firewall delete rule name=''Odysseus AI Network Host'' 1>$null 2>$null');
+    RunPowerShellHidden(
+      'netsh.exe advfirewall firewall delete rule name=''Odysseus Ollama WSL Bridge'' 1>$null 2>$null');
 
     if not RemoveResidualInstallFiles then
       exit;

@@ -322,8 +322,7 @@ function Ensure-OllamaEndpoint {
     for ($i = 0; $i -lt 20; $i++) {
         Write-Progress -Activity 'Starting Ollama service' -Status 'Waiting for http://localhost:11434 to respond.' -PercentComplete (($i / 20) * 100)
         Start-Sleep -Milliseconds 500
-        $probe = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        if ($probe -and $probe.StatusCode -eq 200) {
+        if (Test-HttpEndpoint -Uri 'http://localhost:11434/api/tags' -TimeoutSec 2) {
             Write-Host "[INFO] Ollama localhost audit passed: http://localhost:11434/api/tags is reachable." -ForegroundColor DarkGray
             Write-Progress -Activity 'Starting Ollama service' -Completed
             return
@@ -333,6 +332,34 @@ function Ensure-OllamaEndpoint {
     Write-Progress -Activity 'Starting Ollama service' -Completed
 
     throw "Ollama did not become reachable on http://localhost:11434/api/tags. Start it manually with: `"$($ollama.Source)`" serve, then verify it is bound to 0.0.0.0:11434 rather than only 127.0.0.1:11434."
+}
+
+function Ensure-OllamaFirewallBridge {
+    $ruleName = 'Odysseus Ollama WSL Bridge'
+
+    try {
+        $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+        if ($existing) {
+            if ($existing.Enabled -ne 'True') {
+                Set-NetFirewallRule -DisplayName $ruleName -Enabled True -ErrorAction Stop | Out-Null
+            }
+            return
+        }
+
+        New-NetFirewallRule `
+            -DisplayName $ruleName `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 11434 `
+            -Profile Any `
+            -ErrorAction Stop | Out-Null
+
+        Write-Host "[INFO] Added firewall rule '$ruleName' for TCP 11434." -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Host "[WARN] Could not create/update firewall rule '$ruleName'. If WSL still cannot reach Ollama, run launcher as Administrator once or add an inbound allow rule for TCP 11434." -ForegroundColor Yellow
+    }
 }
 
 function Invoke-WslCommand {
@@ -372,6 +399,40 @@ function Get-WslGatewayIp {
     }
 
     return $null
+}
+
+function Get-WslOllamaCandidates {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
+        $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE.Trim())
+    }
+
+    $gatewayIp = Get-WslGatewayIp
+    if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
+        $candidates.Add($gatewayIp)
+    }
+
+    $dnsHost = Invoke-WslCommand -Command "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf 2>/dev/null"
+    if ($dnsHost.ExitCode -eq 0) {
+        $resolved = (($dnsHost.Output | Select-Object -First 1) -as [string]).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+            $candidates.Add($resolved)
+        }
+    }
+
+    $candidates.Add('host.docker.internal')
+
+    $unique = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+        $unique.Add($candidate)
+    }
+
+    return @($unique)
 }
 
 function Invoke-WslComposeCommand {
@@ -448,14 +509,26 @@ function Test-OdysseusRuntimeHealth {
         $issues.Add('Windows Ollama endpoint is down (http://localhost:11434/api/tags).')
     }
 
-    $gatewayIp = Get-WslGatewayIp
-    if ([string]::IsNullOrWhiteSpace($gatewayIp)) {
-        $issues.Add('WSL default gateway could not be resolved.')
+    $ollamaCandidates = Get-WslOllamaCandidates
+    if ($ollamaCandidates.Count -eq 0) {
+        $issues.Add('No WSL host candidates available for Ollama reachability checks.')
     }
     else {
-        $gatewayReach = Invoke-WslCommand -Command "curl -sf --max-time 3 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1"
-        if ($gatewayReach.ExitCode -ne 0) {
-            $issues.Add("WSL cannot reach Ollama via gateway ${gatewayIp}:11434.")
+        $reachableVia = $null
+        $attempts = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($candidate in $ollamaCandidates) {
+            $probe = Invoke-WslCommand -Command "curl --noproxy '*' -sf --max-time 3 http://${candidate}:11434/api/tags >/dev/null 2>&1"
+            if ($probe.ExitCode -eq 0) {
+                $reachableVia = $candidate
+                break
+            }
+
+            $attempts.Add("${candidate} (exit $($probe.ExitCode))")
+        }
+
+        if ([string]::IsNullOrWhiteSpace($reachableVia)) {
+            $issues.Add("WSL cannot reach Ollama from any candidate host (${($attempts -join ', ')}).")
         }
     }
 
@@ -656,6 +729,7 @@ Invoke-Step `
     -Action {
         Ensure-OllamaAvailable | Out-Null
         Ensure-OllamaEndpoint
+        Ensure-OllamaFirewallBridge
     }
 
 Invoke-Step `
