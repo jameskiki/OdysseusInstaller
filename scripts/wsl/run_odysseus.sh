@@ -296,28 +296,56 @@ upsert_env_key() {
     fi
 }
 
-configure_compose_files() {
+compose_args_from_runtime() {
     local env_file="$1"
-    local compose_files="docker-compose.yml"
+    local target_dir="$2"
+    local compose_files
+    local compose_file
+    local args=(--env-file "$env_file")
+
+    compose_files=$(grep '^COMPOSE_FILE=' "$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ -z "$compose_files" ]; then
+        args+=(-f "$target_dir/docker-compose.yml")
+        printf '%s\n' "${args[@]}"
+        return 0
+    fi
+
+    IFS=':' read -r -a compose_file_list <<< "$compose_files"
+    for compose_file in "${compose_file_list[@]}"; do
+        if [ -n "$compose_file" ]; then
+            args+=(-f "$compose_file")
+        fi
+    done
+
+    printf '%s\n' "${args[@]}"
+}
+
+configure_compose_files_runtime() {
+    local env_file="$1"
+    local target_dir="$2"
+    local host_override_path="$3"
+    local compose_files="$target_dir/docker-compose.yml"
 
     if command -v nvidia-smi > /dev/null 2>&1; then
-        compose_files="${compose_files}:docker-compose.gpu-nvidia.yml"
+        compose_files="${compose_files}:$target_dir/docker-compose.gpu-nvidia.yml"
     fi
 
     if [ "${ODYSSEUS_HOST_MODE:-0}" = "1" ]; then
-        cat > docker-compose.host-mode.override.yml <<'HOSTEOF'
+        cat > "$host_override_path" <<'HOSTEOF'
 services:
   odysseus:
     ports:
       - "0.0.0.0:7000:7000"
 HOSTEOF
-        compose_files="${compose_files}:docker-compose.host-mode.override.yml"
+        compose_files="${compose_files}:$host_override_path"
+    else
+        rm -f "$host_override_path"
     fi
 
     upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
 }
 
-configure_gateway_endpoints() {
+configure_gateway_endpoints_runtime() {
     local env_file="$1"
     local gateway_host
 
@@ -448,6 +476,9 @@ fi
 
 print_step "Synchronizing the Odysseus project source workspace..."
 TARGET_DIR="$HOME/odysseus"
+RUNTIME_DIR="$HOME/.odysseus"
+RUNTIME_ENV="$RUNTIME_DIR/runtime.env"
+HOST_OVERRIDE_FILE="$RUNTIME_DIR/docker-compose.host-mode.override.yml"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
@@ -460,36 +491,53 @@ if [ ! -d "$TARGET_DIR" ]; then
     else
         print_fail "Failed to clone Odysseus branch '$ODYSSEUS_REPO_REF'. Verify the branch exists and rerun."
     fi
-    cp .env.example .env
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
-    git fetch origin "$ODYSSEUS_REPO_REF"
-    git checkout "$ODYSSEUS_REPO_REF"
+    if ! git fetch origin "$ODYSSEUS_REPO_REF"; then
+        print_fail "Failed to fetch origin/$ODYSSEUS_REPO_REF. Verify network access and branch name, then rerun."
+    fi
+
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely."
+    fi
+
+    if ! git checkout "$ODYSSEUS_REPO_REF"; then
+        print_fail "Failed to checkout branch '$ODYSSEUS_REPO_REF' in ~/odysseus. Resolve local git state and rerun."
+    fi
+
     if git pull --ff-only origin "$ODYSSEUS_REPO_REF"; then
         print_ok "Odysseus workspace updated."
     else
         print_fail "Odysseus workspace update failed because local checkout diverged from origin/$ODYSSEUS_REPO_REF. Resolve git state in ~/odysseus and rerun."
     fi
-    if [ ! -f .env ]; then
-        cp .env.example .env
-        print_ok "Environment file created from the current template."
+fi
+
+mkdir -p "$RUNTIME_DIR"
+if [ ! -f "$RUNTIME_ENV" ]; then
+    if [ -f "$TARGET_DIR/.env.example" ]; then
+        cp "$TARGET_DIR/.env.example" "$RUNTIME_ENV"
+        print_ok "Runtime environment initialized at $RUNTIME_ENV from .env.example."
+    else
+        : > "$RUNTIME_ENV"
+        print_ok "Runtime environment initialized at $RUNTIME_ENV."
     fi
 fi
 
 print_step "Applying host connectivity and compose profile settings..."
-configure_compose_files ".env"
-configure_gateway_endpoints ".env"
+configure_compose_files_runtime "$RUNTIME_ENV" "$TARGET_DIR" "$HOST_OVERRIDE_FILE"
+configure_gateway_endpoints_runtime "$RUNTIME_ENV"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Auditing Windows-hosted Ollama reachability from WSL..."
 audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 
 print_step "Deploying application containers..."
+mapfile -t COMPOSE_RUNTIME_ARGS < <(compose_args_from_runtime "$RUNTIME_ENV" "$TARGET_DIR")
 if [ "$ODYSSEUS_REBUILD" = "1" ]; then
-    run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers rebuilt and active in background."
+    run_with_progress "Building and starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d --build && print_ok "Containers rebuilt and active in background."
 else
-    run_with_progress "Starting application containers" sudo docker compose up -d && print_ok "Containers active in background (rebuild skipped)."
+    run_with_progress "Starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d && print_ok "Containers active in background (rebuild skipped)."
 fi
 
 print_step "Polling local network port 7000 to verify runtime status..."
@@ -503,7 +551,7 @@ until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/
     fi
     if [ $COUNT -ge $TIMEOUT ]; then
         echo ""
-        print_fail "Network handshake timeout after ${TIMEOUT}s. Check the Odysseus container logs with: sudo docker compose logs -f odysseus"
+        print_fail "Network handshake timeout after ${TIMEOUT}s. Check Odysseus container logs from ~/odysseus using your runtime compose profile."
     fi
     sleep 2
 done
@@ -512,7 +560,7 @@ print_ok "Application socket online after ${COUNT}s."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
-    odysseus_logs="$(sudo docker compose logs odysseus)"
+    odysseus_logs="$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" logs odysseus)"
     if ! printf '%s\n' "$odysseus_logs" | grep -i "password" > "$password_log"; then
         {
             echo "No explicit password line was found in odysseus logs. Recent startup logs are included below:"

@@ -115,13 +115,13 @@ The watchdog continuously checks:
 - Required compose services (`odysseus`, `chromadb`, `ntfy`, `searxng`)
 - Odysseus HTTP endpoint (`http://localhost:7000`)
 
-On drift, it attempts lightweight recovery with `docker compose up -d` (with non-interactive sudo fallback).
+On drift, it attempts lightweight recovery with `docker compose up -d` using the runtime profile under `~/.odysseus/runtime.env` (with non-interactive sudo fallback).
 
 ---
 
 ## 3. Linux Bootstrap (`scripts/wsl/run_odysseus.sh`)
 
-This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odysseus source, configures `.env`, and starts containers.
+This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odysseus source, writes machine-local runtime configuration, and starts containers.
 
 ### Core reliability helpers
 
@@ -130,10 +130,18 @@ This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odys
 - `run_apt_update`: apt update with retries and timeout configuration.
 - `run_with_progress`: spinner/progress wrapper with log tail on failure.
 
+### Runtime configuration location
+
+Runtime state is stored outside the git-tracked repo so branch updates remain clean:
+- `~/.odysseus/runtime.env`
+- `~/.odysseus/docker-compose.host-mode.override.yml` (host mode only)
+
+The script seeds `runtime.env` from `~/odysseus/.env.example` when available, then updates runtime keys there.
+
 ### Networking and endpoint configuration
 
 - `resolve_windows_ollama_host`: discovers best Windows host endpoint from override, resolv.conf nameserver, default route gateway, and `host.docker.internal`.
-- `configure_gateway_endpoints`: updates `.env` keys via `upsert_env_key`:
+- `configure_gateway_endpoints_runtime`: updates runtime env keys via `upsert_env_key`:
   - `LLM_HOST`
   - `LLM_HOSTS`
   - `OLLAMA_BASE_URL`
@@ -142,12 +150,12 @@ This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odys
 
 ### Compose profile selection
 
-`configure_compose_files` dynamically sets `COMPOSE_FILE`:
-- base: `docker-compose.yml`
-- NVIDIA: add `docker-compose.gpu-nvidia.yml` when GPU tooling is available
-- host mode: generates `docker-compose.host-mode.override.yml` and appends it
+`configure_compose_files_runtime` dynamically sets `COMPOSE_FILE` in `~/.odysseus/runtime.env`:
+- base: absolute path to `~/odysseus/docker-compose.yml`
+- NVIDIA: add absolute path to `~/odysseus/docker-compose.gpu-nvidia.yml` when GPU tooling is available
+- host mode: generates `~/.odysseus/docker-compose.host-mode.override.yml` and appends it
 
-This replaces older approaches that rewrote `docker-compose.yml` with `sed`.
+Compose startup consumes this runtime profile explicitly (`--env-file` and `-f` flags), rather than mutating files inside `~/odysseus`.
 
 ### Docker and permissions
 
@@ -158,7 +166,8 @@ This replaces older approaches that rewrote `docker-compose.yml` with `sed`.
 ### Source sync and startup
 
 - Clones or updates `~/odysseus` using `ODYSSEUS_REPO_REF`.
-- Starts containers with or without rebuild using `ODYSSEUS_REBUILD`.
+- Fails early with a targeted message when local git changes are detected in `~/odysseus` before branch sync.
+- Starts containers with or without rebuild using `ODYSSEUS_REBUILD` and runtime compose args derived from `~/.odysseus/runtime.env`.
 - Polls local endpoint `http://127.0.0.1:7000` for readiness.
 
 ### First-boot password handling
@@ -177,7 +186,7 @@ On first boot:
 - Ollama process/listener/HTTP health
 - WSL availability and Ubuntu distro detection
 - WSL routing and host gateway reachability
-- `.env` key presence in `~/odysseus/.env`
+- Runtime key presence in `~/.odysseus/runtime.env` (fallback to `~/odysseus/.env`)
 - Docker daemon and compose container status
 - Odysseus HTTP endpoint availability
 - Optional LAN exposure checks (`-CheckLanReachability`)

@@ -369,11 +369,39 @@ function Get-WslGatewayIp {
     return $null
 }
 
+function Invoke-WslComposeCommand {
+    param(
+        [string]$ComposeArgs,
+        [switch]$UseSudo
+    )
+
+    $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+    $script = @'
+cd ~/odysseus 2>/dev/null || exit 1
+runtime_env="$HOME/.odysseus/runtime.env"
+compose_args=()
+if [ -f "$runtime_env" ]; then
+  compose_args+=(--env-file "$runtime_env")
+  compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+  if [ -n "$compose_files" ]; then
+    IFS=':' read -r -a cf <<< "$compose_files"
+    for f in "${cf[@]}"; do
+      [ -n "$f" ] && compose_args+=(-f "$f")
+    done
+  fi
+fi
+__SUDO__docker compose "${compose_args[@]}" __ARGS__
+'@
+
+    $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs)
+    return Invoke-WslCommand -Command $command
+}
+
 function Get-ComposeServiceStates {
-    $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
+    $result = Invoke-WslComposeCommand -ComposeArgs "ps --format '{{.Service}}|{{.State}}|{{.Health}}'"
     if ($result.ExitCode -ne 0) {
         # Fallback for environments that still require sudo, but keep it non-interactive.
-        $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
+        $result = Invoke-WslComposeCommand -ComposeArgs "ps --format '{{.Service}}|{{.State}}|{{.Health}}'" -UseSudo
     }
     if ($result.ExitCode -ne 0) {
         return @{}
@@ -466,10 +494,10 @@ function Test-OdysseusRuntimeHealth {
 
 function Invoke-WatchdogAutoHealLight {
     Write-Host "[WATCHDOG][WARN] Runtime drift detected. Attempting lightweight recovery with 'docker compose up -d'." -ForegroundColor Yellow
-    $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose up -d"
+    $heal = Invoke-WslComposeCommand -ComposeArgs 'up -d'
     if ($heal.ExitCode -ne 0) {
         # Fallback without password prompt when sudo is required.
-        $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose up -d"
+        $heal = Invoke-WslComposeCommand -ComposeArgs 'up -d' -UseSudo
     }
     return ($heal.ExitCode -eq 0)
 }

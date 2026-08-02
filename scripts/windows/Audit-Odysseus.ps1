@@ -7,7 +7,7 @@
     Checks key runtime layers and reports PASS/WARN/FAIL status:
     - Ollama process, listener, and localhost endpoint
     - WSL availability and host routing
-    - .env model endpoint keys in ~/odysseus/.env
+    - Runtime model endpoint keys in ~/.odysseus/runtime.env (fallback: ~/odysseus/.env)
     - Docker daemon and compose container status
     - Odysseus HTTP endpoint on port 7000
 
@@ -57,6 +57,33 @@ function Write-Section {
 function Invoke-Wsl {
     param([string]$Command)
     & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
+}
+
+function Invoke-WslCompose {
+        param(
+                [string]$ComposeArgs,
+                [switch]$UseSudo
+        )
+
+        $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+        $command = @'
+cd ~/odysseus 2>/dev/null || exit 1
+runtime_env="$HOME/.odysseus/runtime.env"
+compose_args=()
+if [ -f "$runtime_env" ]; then
+    compose_args+=(--env-file "$runtime_env")
+    compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ -n "$compose_files" ]; then
+        IFS=':' read -r -a cf <<< "$compose_files"
+        for f in "${cf[@]}"; do
+            [ -n "$f" ] && compose_args+=(-f "$f")
+        done
+    fi
+fi
+__SUDO__docker compose "${compose_args[@]}" __ARGS__
+'@
+
+        Invoke-Wsl ($command.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs))
 }
 
 function Get-InstalledWslDistros {
@@ -167,21 +194,21 @@ else {
 Write-Section "3) Environment and containers"
 
 if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
-    $envLines = Invoke-Wsl 'cat ~/odysseus/.env 2>/dev/null'
+    $envLines = Invoke-Wsl 'if [ -f ~/.odysseus/runtime.env ]; then cat ~/.odysseus/runtime.env; else cat ~/odysseus/.env 2>/dev/null; fi'
     if ($null -eq $envLines -or ($envLines -join '').Trim().Length -eq 0) {
-        Write-Check -Name ".env present" -Status WARN -Detail "~/odysseus/.env not found or empty."
+        Write-Check -Name "Runtime env present" -Status WARN -Detail "Neither ~/.odysseus/runtime.env nor ~/odysseus/.env was found with content."
     }
     else {
-        Write-Check -Name ".env present" -Status PASS
+        Write-Check -Name "Runtime env present" -Status PASS
 
         $requiredKeys = @('LLM_HOST', 'LLM_HOSTS', 'OLLAMA_BASE_URL', 'EMBEDDING_URL')
         foreach ($key in $requiredKeys) {
             $line = $envLines | Where-Object { $_ -match ("^{0}=" -f [regex]::Escape($key)) } | Select-Object -Last 1
             if ($line) {
-                Write-Check -Name (".env key {0}" -f $key) -Status PASS
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status PASS
             }
             else {
-                Write-Check -Name (".env key {0}" -f $key) -Status WARN -Detail "Key is missing."
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status WARN -Detail "Key is missing."
             }
         }
     }
@@ -192,11 +219,11 @@ if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
     if ($dockerRunning -eq 'RUNNING') {
         Write-Check -Name "Docker daemon (WSL)" -Status PASS
 
-        $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; docker compose ps -a 2>/dev/null'
+        $composePs = Invoke-WslCompose -ComposeArgs 'ps -a'
         if (-not $composePs -or ($composePs -join '').Trim().Length -eq 0) {
             # Fallback for environments where docker requires sudo. Use -n to avoid
             # interactive password prompts during health checks.
-            $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; sudo -n docker compose ps -a 2>/dev/null'
+            $composePs = Invoke-WslCompose -ComposeArgs 'ps -a' -UseSudo
         }
 
         $rows = @($composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
