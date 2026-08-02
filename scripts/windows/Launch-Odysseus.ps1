@@ -1,3 +1,7 @@
+param(
+    [switch]$TestMode
+)
+
 Clear-Host
 $ErrorActionPreference = 'Stop'
 
@@ -21,8 +25,11 @@ if (-not (Test-Path $BootstrapScript)) {
 $HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
 $RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
 $RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
+$TestModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_TEST_MODE'
 $IsHostMode = Test-Path $HostModeFile
+$IsTestMode = $TestMode -or (Test-Path $TestModeFile) -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
+$env:ODYSSEUS_TEST_MODE = if ($IsTestMode) { '1' } else { '0' }
 $repoRef = 'main'
 if (Test-Path $RepoRefFile) {
     $rawRepoRef = (Get-Content -Path $RepoRefFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
@@ -39,17 +46,26 @@ if (Test-Path $RebuildModeFile) {
     }
 }
 
+if ($IsTestMode) {
+    $rebuildMode = 'never'
+}
+
 $env:ODYSSEUS_REPO_REF = $repoRef
 switch ($rebuildMode) {
     'always' { $env:ODYSSEUS_REBUILD = '1' }
     'never' { $env:ODYSSEUS_REBUILD = '0' }
     default {
-        $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
-        $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        if ($IsTestMode) {
+            $env:ODYSSEUS_REBUILD = '0'
+        }
+        else {
+            $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
+            $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        }
     }
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE')
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -672,7 +688,9 @@ function Invoke-Step {
             Write-Host "Full log: $LogFile" -ForegroundColor DarkGray
         }
         try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-        Read-Host 'Press Enter to close...'
+        if (-not $IsTestMode) {
+            Read-Host 'Press Enter to close...'
+        }
         exit 1
     }
 }
@@ -680,6 +698,9 @@ function Invoke-Step {
 Invoke-Step `
     -Intent "Applying local runtime preferences (branch/ref '$repoRef', rebuild mode '$rebuildMode')..." `
     -Action {
+        if ($IsTestMode) {
+            Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
+        }
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }
@@ -717,6 +738,18 @@ Invoke-Step `
             Write-Host "WSL systemd was enabled and WSL was restarted." -ForegroundColor DarkGray
         }
     }
+
+if ($IsTestMode) {
+    Invoke-Step `
+        -Intent "Stopping after launcher preflight validation because test mode is enabled..." `
+        -Action {
+            Write-Host "[INFO] Skipped Ollama auto-install, Linux bootstrap, endpoint polling, browser launch, and watchdog startup." -ForegroundColor DarkGray
+        }
+
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    Write-Host 'Odysseus launcher preflight test finished.' -ForegroundColor DarkGray
+    exit 0
+}
 
 Invoke-Step `
     -Intent "Checking local Ollama runtime for model discovery compatibility..." `

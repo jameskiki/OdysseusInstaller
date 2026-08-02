@@ -83,11 +83,18 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 - Reads repo ref from `ODYSSEUS_REPO_REF` (default `main`).
 - Reads rebuild mode from `ODYSSEUS_REBUILD_MODE` (`ask|always|never`).
 - Reads host mode from `ODYSSEUS_HOST_MODE` presence.
+- Reads launcher test mode from any of:
+  - `-TestMode` switch
+  - `ODYSSEUS_TEST_MODE` marker file beside the launcher
+  - `ODYSSEUS_TEST_MODE=1|true|yes` environment value
 - Exports to WSL through `WSLENV`:
   - `ODYSSEUS_HOST_MODE`
   - `ODYSSEUS_REPO_REF`
   - `ODYSSEUS_REBUILD`
   - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+  - `ODYSSEUS_TEST_MODE`
+
+When launcher test mode is active, rebuild mode is forced to `never` and interactive prompts are suppressed.
 
 ### Main pipeline
 
@@ -104,6 +111,8 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 9. Poll Odysseus endpoint readiness (`http://localhost:7000`) with retry loop.
 10. Open browser.
 11. Start `Start-OdysseusWatchdog` loop (10s interval, `auto-heal-light`).
+
+When test mode is enabled, the launcher stops after preflight validation and transcript shutdown. It skips Ollama installation checks, Linux bootstrap, endpoint polling, browser launch, and watchdog startup.
 
 ### Watchdog behavior
 

@@ -221,6 +221,15 @@ else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
             $candidates = [System.Collections.Generic.List[string]]::new()
+            if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
+                $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
+            }
+
+            $resolverCandidate = ((Invoke-Wsl "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf 2>/dev/null") | Select-Object -First 1).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($resolverCandidate)) {
+                $candidates.Add($resolverCandidate)
+            }
+
             if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
                 $candidates.Add($gatewayIp)
             }

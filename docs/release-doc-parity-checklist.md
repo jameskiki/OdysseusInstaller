@@ -23,6 +23,9 @@ Use this checklist before creating or publishing a release tag.
   - dynamic Ubuntu distro resolution (`Ubuntu`, `Ubuntu-XX.XX`)
   - Ubuntu first-run initialization path
   - WSL systemd enforcement and restart behavior
+  - TestMode activation paths (`-TestMode`, marker file, env variable)
+  - TestMode behavior (non-interactive, rebuild forced to never, preflight-only stop)
+  - `ODYSSEUS_TEST_MODE` forwarding via `WSLENV`
   - endpoint readiness poll before browser launch
   - watchdog mode and healing behavior
 
