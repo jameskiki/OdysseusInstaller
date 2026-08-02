@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
-set -e
+set -Ee -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/false
+
+RUNTIME_LOG_DIR="$HOME/.odysseus/logs"
+mkdir -p "$RUNTIME_LOG_DIR"
+BOOTSTRAP_LOG_FILE="${ODYSSEUS_BOOTSTRAP_LOG:-$RUNTIME_LOG_DIR/bootstrap-$(date +%Y%m%d-%H%M%S).log}"
+touch "$BOOTSTRAP_LOG_FILE" 2>/dev/null || true
+ln -sfn "$BOOTSTRAP_LOG_FILE" "$RUNTIME_LOG_DIR/latest-bootstrap.log" 2>/dev/null || true
+exec > >(tee -a "$BOOTSTRAP_LOG_FILE") 2>&1
+echo "[INFO] Bootstrap log: $BOOTSTRAP_LOG_FILE"
 
 print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
+
+handle_unexpected_error() {
+    local exit_code="$1"
+    local line_no="$2"
+    local failed_command="$3"
+    print_fail "Unexpected bootstrap error (exit ${exit_code}) at line ${line_no} while running: ${failed_command}"
+}
+
+trap 'handle_unexpected_error $? $LINENO "$BASH_COMMAND"' ERR
 
 run_with_progress() {
     local label="$1"
@@ -31,9 +50,10 @@ run_with_progress() {
     printf '\r%-100s\r' ''
 
     if [ "$exit_code" -ne 0 ]; then
+        echo "[INFO] Command failed: $*"
+        echo "[INFO] Full command log: $log_file"
         echo "[INFO] Last installer output:"
-        tail -n 20 "$log_file" || true
-        rm -f "$log_file"
+        tail -n 40 "$log_file" || true
         return "$exit_code"
     fi
 
@@ -295,6 +315,36 @@ run_apt_update() {
     fi
 }
 
+run_git_command() {
+    local operation_label="$1"
+    shift
+
+    local git_output
+    local exit_code
+
+    set +e
+    if command -v timeout > /dev/null 2>&1; then
+        git_output=$(timeout 180 git "$@" 2>&1)
+        exit_code=$?
+    else
+        git_output=$(git "$@" 2>&1)
+        exit_code=$?
+    fi
+    set -e
+
+    if [ "$exit_code" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 137 ]; then
+        print_fail "${operation_label} timed out after 180 seconds. Check network/VPN/proxy access to github.com and rerun."
+    fi
+
+    local tail_output
+    tail_output=$(printf '%s\n' "$git_output" | tail -n 30)
+    print_fail "${operation_label} failed. Git output: ${tail_output}"
+}
+
 wait_for_docker() {
     for _ in $(seq 1 20); do
         if sudo docker info > /dev/null 2>&1; then
@@ -467,10 +517,12 @@ ensure_port_7000_available_for_compose() {
     print_fail "Port 7000 is already in use by another process. Stop the conflicting listener and rerun. Helpful commands: 'sudo ss -ltnp \'sport = :7000\'' and 'sudo docker ps --format \"table {{.Names}}\\t{{.Ports}}\"'."
 }
 
-trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
-
 print_step "Refreshing sudo credentials for package management..."
-sudo -v || print_fail "Sudo authentication failed."
+echo "[INFO] If prompted, enter your Ubuntu password and press Enter (characters will not be shown)."
+if ! sudo -v -p '[SUDO] Enter Ubuntu password for Odysseus bootstrap: '; then
+    print_fail "Sudo authentication failed. Verify your Ubuntu password and rerun the launcher."
+fi
+print_ok "Sudo credential ticket is active."
 
 print_step "Waiting for package manager locks to clear..."
 wait_for_apt_unlock || print_fail "Timed out waiting for apt/dpkg lock files."
@@ -590,7 +642,7 @@ ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
-    if git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
+    if run_with_progress "Cloning Odysseus branch ${ODYSSEUS_REPO_REF}" git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
         cd "$TARGET_DIR"
     else
         print_fail "Failed to clone Odysseus branch '$ODYSSEUS_REPO_REF'. Verify the branch exists and rerun."
@@ -598,23 +650,20 @@ if [ ! -d "$TARGET_DIR" ]; then
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
-    if ! git fetch origin "$ODYSSEUS_REPO_REF"; then
-        print_fail "Failed to fetch origin/$ODYSSEUS_REPO_REF. Verify network access and branch name, then rerun."
-    fi
+
+    echo "[INFO] Fetching latest metadata for origin/${ODYSSEUS_REPO_REF}..."
+    run_git_command "Fetch from origin/${ODYSSEUS_REPO_REF}" fetch origin "$ODYSSEUS_REPO_REF"
 
     if ! git diff --quiet || ! git diff --cached --quiet; then
-        print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely."
+        local_changes=$(git status --short | head -n 20)
+        print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely. Current changes: ${local_changes}"
     fi
 
-    if ! git checkout "$ODYSSEUS_REPO_REF"; then
-        print_fail "Failed to checkout branch '$ODYSSEUS_REPO_REF' in ~/odysseus. Resolve local git state and rerun."
-    fi
+    run_git_command "Checkout branch ${ODYSSEUS_REPO_REF}" checkout "$ODYSSEUS_REPO_REF"
 
-    if git pull --ff-only origin "$ODYSSEUS_REPO_REF"; then
-        print_ok "Odysseus workspace updated."
-    else
-        print_fail "Odysseus workspace update failed because local checkout diverged from origin/$ODYSSEUS_REPO_REF. Resolve git state in ~/odysseus and rerun."
-    fi
+    echo "[INFO] Fast-forwarding local workspace from origin/${ODYSSEUS_REPO_REF}..."
+    run_git_command "Fast-forward pull from origin/${ODYSSEUS_REPO_REF}" pull --ff-only origin "$ODYSSEUS_REPO_REF"
+    print_ok "Odysseus workspace updated."
 fi
 
 mkdir -p "$RUNTIME_DIR"
@@ -639,14 +688,35 @@ audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 print_step "Deploying application containers..."
 mapfile -t COMPOSE_RUNTIME_ARGS < <(compose_args_from_runtime "$RUNTIME_ENV" "$TARGET_DIR")
 
+print_step "Validating Docker compose runtime configuration..."
+compose_config_log=$(mktemp /tmp/odysseus-compose-config.XXXXXX.log)
+if sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" config -q >"$compose_config_log" 2>&1; then
+    rm -f "$compose_config_log"
+    print_ok "Compose configuration is valid."
+else
+    echo "[INFO] docker compose config validation output:"
+    cat "$compose_config_log" || true
+    print_fail "Compose configuration validation failed. Fix the compose/env configuration shown above and rerun."
+fi
+
 print_step "Preflight-checking local port 7000 availability before container startup..."
 ensure_port_7000_available_for_compose
 print_ok "Port 7000 preflight check passed."
 
 if [ "$ODYSSEUS_REBUILD" = "1" ]; then
-    run_with_progress "Building and starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d --build && print_ok "Containers rebuilt and active in background."
+    if run_with_progress "Building and starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d --build; then
+        print_ok "Containers rebuilt and active in background."
+    else
+        compose_state=$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps 2>&1 || true)
+        print_fail "docker compose up --build failed. Review command log output above and compose state: ${compose_state}"
+    fi
 else
-    run_with_progress "Starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d && print_ok "Containers active in background (rebuild skipped)."
+    if run_with_progress "Starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d; then
+        print_ok "Containers active in background (rebuild skipped)."
+    else
+        compose_state=$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps 2>&1 || true)
+        print_fail "docker compose up -d failed. Review command log output above and compose state: ${compose_state}"
+    fi
 fi
 
 print_step "Polling local network port 7000 to verify runtime status..."
@@ -694,4 +764,3 @@ if [ "$FIRST_BOOT" = true ]; then
     read -p "Press [Enter] once you have copied your password to launch Edge..."
 fi
 
-trap - EXIT

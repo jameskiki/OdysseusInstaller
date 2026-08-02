@@ -210,6 +210,24 @@ function Get-LastNonEmptyLine {
     return $null
 }
 
+function Get-FileTailText {
+    param(
+        [string]$Path,
+        [int]$Tail = 40
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return $null
+    }
+
+    $lines = Get-Content -Path $Path -Tail $Tail -ErrorAction SilentlyContinue
+    if ($null -eq $lines -or $lines.Count -eq 0) {
+        return $null
+    }
+
+    return (($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n")
+}
+
 function Invoke-ProcessWithProgress {
     param (
         [string]$FilePath,
@@ -713,10 +731,26 @@ Invoke-Step `
 Invoke-Step `
     -Intent "Crossing OS boundary to trigger the Linux Environment Automator..." `
     -Action {
+        Write-Host "[INFO] During bootstrap, Ubuntu may prompt for your Linux password in this window before package/container setup can continue." -ForegroundColor Yellow
+        Write-Host "[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus bootstrap:" -ForegroundColor Yellow
+        Write-Host "[INFO] A WSL-side bootstrap log is also written to ~/.odysseus/logs/latest-bootstrap.log" -ForegroundColor DarkGray
+
         & wsl.exe -d $WslDistro -- bash -lc '~/run_odysseus.sh'
-        if ($LASTEXITCODE -ne 0) {
-            throw "The Linux bootstrap script exited with code $LASTEXITCODE."
+        $bootstrapExitCode = [int]$LASTEXITCODE
+
+        if ($bootstrapExitCode -ne 0) {
+            $bootstrapLogPath = ((& wsl.exe -d $WslDistro -- bash -lc 'echo ~/.odysseus/logs/latest-bootstrap.log') | Select-Object -First 1).Trim()
+            $bootstrapTail = (& wsl.exe -d $WslDistro -- bash -lc 'if [ -f ~/.odysseus/logs/latest-bootstrap.log ]; then tail -n 80 ~/.odysseus/logs/latest-bootstrap.log; fi')
+
+            $details = @("Bootstrap log: $bootstrapLogPath")
+            if ($bootstrapTail -and $bootstrapTail.Count -gt 0) {
+                $details += "bootstrap output tail:`n$($bootstrapTail -join "`n")"
+            }
+
+            throw "The Linux bootstrap script failed with exit code $bootstrapExitCode.`n$($details -join "`n`n")"
         }
+
+        Write-Host "[INFO] WSL bootstrap finished successfully." -ForegroundColor DarkGray
     }
 
 Invoke-Step `
