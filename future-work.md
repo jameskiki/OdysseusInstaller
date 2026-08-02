@@ -2,9 +2,6 @@
 
 ## Installer UX
 
-- Remote install mode: show the expected reachable server IP or hostname during configuration and in the pre-install summary.
-- Local install mode: replace free-text branch entry with a dropdown of selectable branches.
-- Pre-install summary: report what is already present versus what still needs to be installed or configured.
 - WSL onboarding: decide whether Ubuntu first-run login can be automated; if not, document the security and UX constraint explicitly.
 
 ## Launcher And Runtime Reliability

@@ -30,11 +30,11 @@ Before launching Odysseus, install WSL2 with Ubuntu by running `wsl --install -d
 
 **1. Download the installer**
 
-Download `Odysseus_Setup.exe` from the [Releases](../../releases) page.
+Download the latest Windows installer from the [Releases](../../releases) page.
 
 **2. Run the installer**
 
-Double-click `Odysseus_Setup.exe` and follow the wizard.
+Double-click the downloaded installer and follow the wizard.
 
 - Accept the licence agreement.
 - Choose your **deployment mode** (see below).
@@ -76,7 +76,7 @@ The launcher also enables the same preflight-only mode when an `ODYSSEUS_TEST_MO
 | Local or host machine | `http://localhost:7000` |
 | Connecting remotely | `http://<host-ip>:7000` |
 
-If launch fails during the Ollama reachability audit, run the **Odysseus Health Audit** shortcut. The audit now reports which WSL host candidates were tested for Ollama (`gateway`, `host.docker.internal`, or an explicit override), which helps diagnose Windows 10 host-routing edge cases quickly.
+If launch fails during the Ollama reachability audit, run the **Odysseus Health Audit** shortcut. The audit reports which WSL host candidates were tested for Ollama in priority order: explicit override, Windows default-route IPv4, WSL resolver nameserver, WSL default gateway, and `host.docker.internal`. This helps diagnose Windows 10 host-routing edge cases quickly.
 
 ---
 

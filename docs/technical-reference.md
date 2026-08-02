@@ -152,7 +152,7 @@ The script seeds `runtime.env` from `~/odysseus/.env.example` when available, th
 
 ### Networking and endpoint configuration
 
-- `resolve_windows_ollama_host`: discovers best Windows host endpoint from override, resolv.conf nameserver, default route gateway, and `host.docker.internal`.
+- `resolve_windows_ollama_host`: discovers the best Windows host endpoint in this order: explicit override, Windows default-route IPv4, resolv.conf nameserver, default route gateway, then `host.docker.internal`.
 - `configure_gateway_endpoints_runtime`: updates runtime env keys via `upsert_env_key`:
   - `LLM_HOST`
   - `LLM_HOSTS`
