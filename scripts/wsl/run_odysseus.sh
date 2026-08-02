@@ -433,6 +433,40 @@ configure_gateway_endpoints_runtime() {
     export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_host"
 }
 
+get_port_7000_listeners() {
+    if command -v ss > /dev/null 2>&1; then
+        sudo ss -H -ltnp 'sport = :7000' 2>/dev/null || true
+        return 0
+    fi
+
+    if command -v lsof > /dev/null 2>&1; then
+        sudo lsof -nP -iTCP:7000 -sTCP:LISTEN 2>/dev/null || true
+        return 0
+    fi
+
+    echo "Listener diagnostics unavailable (neither 'ss' nor 'lsof' found)."
+    return 0
+}
+
+ensure_port_7000_available_for_compose() {
+    local listeners
+    listeners="$(get_port_7000_listeners)"
+
+    if [ -z "$listeners" ]; then
+        return 0
+    fi
+
+    # Allow an existing healthy Odysseus service for idempotent relaunches.
+    if sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps --services --filter status=running 2>/dev/null | grep -qx 'odysseus'; then
+        echo "[INFO] Port 7000 is already bound by a running Odysseus service for this compose profile."
+        return 0
+    fi
+
+    echo "[INFO] Port 7000 listener snapshot:"
+    printf '%s\n' "$listeners"
+    print_fail "Port 7000 is already in use by another process. Stop the conflicting listener and rerun. Helpful commands: 'sudo ss -ltnp \'sport = :7000\'' and 'sudo docker ps --format \"table {{.Names}}\\t{{.Ports}}\"'."
+}
+
 trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
 
 print_step "Refreshing sudo credentials for package management..."
@@ -604,6 +638,11 @@ audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 
 print_step "Deploying application containers..."
 mapfile -t COMPOSE_RUNTIME_ARGS < <(compose_args_from_runtime "$RUNTIME_ENV" "$TARGET_DIR")
+
+print_step "Preflight-checking local port 7000 availability before container startup..."
+ensure_port_7000_available_for_compose
+print_ok "Port 7000 preflight check passed."
+
 if [ "$ODYSSEUS_REBUILD" = "1" ]; then
     run_with_progress "Building and starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d --build && print_ok "Containers rebuilt and active in background."
 else

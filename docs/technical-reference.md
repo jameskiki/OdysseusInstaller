@@ -141,6 +141,7 @@ This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odys
 - `ensure_dpkg_consistent`: repairs interrupted package states.
 - `run_apt_update`: apt update with retries and timeout configuration.
 - `run_with_progress`: spinner/progress wrapper with log tail on failure.
+- `ensure_port_7000_available_for_compose`: fails early when port 7000 is already owned by a non-Odysseus listener, with actionable diagnostics.
 
 ### Runtime configuration location
 

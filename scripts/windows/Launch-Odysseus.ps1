@@ -30,14 +30,14 @@ catch {
 }
 
 $WslDistro = $null
-$BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
+$BootstrapScript = Join-Path $ScriptRoot 'run_odysseus.sh'
 if (-not (Test-Path $BootstrapScript)) {
-    $BootstrapScript = Join-Path $PSScriptRoot '..\wsl\run_odysseus.sh'
+    $BootstrapScript = Join-Path $ScriptRoot '..\wsl\run_odysseus.sh'
 }
-$HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
-$RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
-$RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
-$TestModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_TEST_MODE'
+$HostModeFile = Join-Path $ScriptRoot 'ODYSSEUS_HOST_MODE'
+$RepoRefFile = Join-Path $ScriptRoot 'ODYSSEUS_REPO_REF'
+$RebuildModeFile = Join-Path $ScriptRoot 'ODYSSEUS_REBUILD_MODE'
+$TestModeFile = Join-Path $ScriptRoot 'ODYSSEUS_TEST_MODE'
 $IsHostMode = Test-Path $HostModeFile
 $IsTestMode = $TestMode -or (Test-Path $TestModeFile) -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
@@ -457,7 +457,8 @@ function Test-OdysseusRuntimeHealth {
         }
 
         if ([string]::IsNullOrWhiteSpace($reachableVia)) {
-            $issues.Add("WSL cannot reach Ollama from any candidate host (${($attempts -join ', ')}).")
+            $attemptSummary = if ($attempts.Count -gt 0) { $attempts -join ', ' } else { 'none' }
+            $issues.Add("WSL cannot reach Ollama from any candidate host ($attemptSummary).")
         }
     }
 
