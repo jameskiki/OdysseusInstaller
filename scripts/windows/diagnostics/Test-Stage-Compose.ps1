@@ -54,9 +54,8 @@ function Write-Check {
     switch ($Status) { 'FAIL' { $script:DiagFail++ }; 'WARN' { $script:DiagWarn++ }; 'PASS' { $script:DiagPass++ } }
 }
 
-# Same runtime.env -> COMPOSE_FILE resolution as Odysseus.RuntimeChecks.psm1's
-# Invoke-OdysseusWslCompose, duplicated here (with 2>&1 merged) because that
-# module helper discards stderr, which hides the real compose error text.
+# Shared compose wrapper from Odysseus.RuntimeChecks.psm1 keeps runtime behavior
+# aligned across launcher, audit, and diagnostics while retaining stderr output.
 function Invoke-WslComposeCaptured {
     param(
         [Parameter(Mandatory = $true)][string]$WslDistro,
@@ -64,26 +63,7 @@ function Invoke-WslComposeCaptured {
         [switch]$UseSudo
     )
 
-    $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
-    $template = @'
-cd ~/odysseus 2>/dev/null || exit 1
-runtime_env="$HOME/.odysseus/runtime.env"
-compose_args=()
-if [ -f "$runtime_env" ]; then
-  compose_args+=(--env-file "$runtime_env")
-  compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
-  if [ -n "$compose_files" ]; then
-    IFS=':' read -r -a cf <<< "$compose_files"
-    for f in "${cf[@]}"; do
-      [ -n "$f" ] && compose_args+=(-f "$f")
-    done
-  fi
-fi
-__SUDO__docker compose "${compose_args[@]}" __ARGS__ 2>&1
-'@
-    $command = $template.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs)
-    $output = & wsl.exe -d $WslDistro -- bash -lc $command
-    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = @($output) }
+        return (Invoke-OdysseusWslComposeCaptured -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo)
 }
 
 function Invoke-DiagnosticStage {
@@ -104,6 +84,18 @@ function Invoke-DiagnosticStage {
     }
     Write-Check -Name 'Odysseus workspace present' -Status PASS
 
+    $sudoTicket = Invoke-OdysseusWslCommand -WslDistro $wslDistro -Command 'sudo -n true >/dev/null 2>&1'
+    if ($sudoTicket.ExitCode -ne 0) {
+        Write-Host '[INFO] Compose stage requires sudo access for docker on this machine.' -ForegroundColor Yellow
+        Write-Host '[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus compose diagnostics:' -ForegroundColor Yellow
+        & wsl.exe -d $wslDistro -- bash -lc "sudo -v -p '[SUDO] Enter Ubuntu password for Odysseus compose diagnostics: '"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Check -Name 'Sudo authentication for compose' -Status FAIL -Detail 'Could not acquire sudo ticket for docker compose commands.'
+            return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        }
+    }
+    Write-Check -Name 'Sudo authentication for compose' -Status PASS
+
     $configResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q'
     if ($configResult.ExitCode -ne 0) {
         $configResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q' -UseSudo
@@ -115,13 +107,14 @@ function Invoke-DiagnosticStage {
     }
     Write-Check -Name 'Compose configuration valid' -Status PASS
 
-    Write-Host '[INFO] Starting containers with a full rebuild (docker compose up -d --build)...' -ForegroundColor DarkGray
-    $upResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'up -d --build'
+    Write-Host '[INFO] Starting containers with a full rebuild (docker compose up -d --build)... this can take several minutes on first run.' -ForegroundColor DarkGray
+    $upResult = Invoke-OdysseusWslCompose -WslDistro $wslDistro -ComposeArgs 'up -d --build' -StreamOutput
     if ($upResult.ExitCode -ne 0) {
-        $upResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'up -d --build' -UseSudo
+        $upResult = Invoke-OdysseusWslCompose -WslDistro $wslDistro -ComposeArgs 'up -d --build' -UseSudo -StreamOutput
     }
     if ($upResult.ExitCode -ne 0) {
-        $tail = ($upResult.Output | Select-Object -Last 40) -join "`n"
+        $upDetail = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'ps --format "{{.Service}} {{.State}} {{.Health}}"'
+        $tail = ($upDetail.Output | Select-Object -Last 40) -join "`n"
         Write-Check -Name 'Containers started (up -d --build)' -Status FAIL -Detail "docker compose up failed:`n$tail"
         return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
     }

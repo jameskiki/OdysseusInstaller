@@ -34,6 +34,8 @@ The installer has five meaningful pages:
 - Remote install skips repo ref and rebuild pages.
 - Local install skips remote host-IP page.
 
+For local installs, branch selection defaults to the repository's current GitHub `default_branch` when it can be fetched; otherwise it falls back to `main`.
+
 ### Key functions
 
 | Function | Purpose |
@@ -67,6 +69,7 @@ Shortcuts created:
 Local-mode sentinel files written under `{app}`:
 - `ODYSSEUS_HOST_MODE`
 - `ODYSSEUS_REPO_REF`
+- `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean` for installer-managed local flow)
 - `ODYSSEUS_REBUILD_MODE`
 
 ### Host firewall rule
@@ -84,6 +87,7 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 ### Runtime preferences and env forwarding
 
 - Reads repo ref from `ODYSSEUS_REPO_REF` (default `main`).
+- Reads repo sync mode from `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`, default `managed-ff` when unset).
 - Reads rebuild mode from `ODYSSEUS_REBUILD_MODE` (`ask|always|never`).
 - Reads host mode from `ODYSSEUS_HOST_MODE` presence.
 - Reads launcher test mode from any of:
@@ -93,6 +97,7 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 - Exports to WSL through `WSLENV`:
   - `ODYSSEUS_HOST_MODE`
   - `ODYSSEUS_REPO_REF`
+  - `ODYSSEUS_REPO_SYNC_MODE`
   - `ODYSSEUS_REBUILD`
   - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
   - `ODYSSEUS_TEST_MODE`
@@ -179,7 +184,10 @@ Compose startup consumes this runtime profile explicitly (`--env-file` and `-f` 
 ### Source sync and startup
 
 - Clones or updates `~/odysseus` using `ODYSSEUS_REPO_REF`.
-- Fails early with a targeted message when local git changes are detected in `~/odysseus` before branch sync.
+- Applies `ODYSSEUS_REPO_SYNC_MODE` policy for existing workspaces:
+  - `managed-clean`: force-reset local branch/worktree to `origin/<ref>` (installer local default).
+  - `managed-ff`: fetch + fast-forward only, preserving local history constraints.
+  - `unmanaged`: skip git fetch/pull and reuse current local checkout as-is.
 - Starts containers with or without rebuild using `ODYSSEUS_REBUILD` and runtime compose args derived from `~/.odysseus/runtime.env`.
 - Polls local endpoint `http://127.0.0.1:7000` for readiness.
 

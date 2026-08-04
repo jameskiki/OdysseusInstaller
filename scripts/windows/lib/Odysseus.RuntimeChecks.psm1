@@ -55,10 +55,22 @@ function Test-OdysseusHttpEndpoint {
     )
 
     try {
-        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 0 -ErrorAction Stop
         return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
     }
     catch {
+        $response = $_.Exception.Response
+        if ($null -ne $response) {
+            try {
+                $statusCode = [int]$response.StatusCode
+                if ($statusCode -ge 200 -and $statusCode -lt 400) {
+                    return $true
+                }
+            }
+            catch {
+                # Fall through and report endpoint as unreachable.
+            }
+        }
         return $false
     }
 }
@@ -128,7 +140,7 @@ function Get-OdysseusOllamaCandidates {
         $candidates.Add([PSCustomObject]@{ Value = $defaultRouteIpv4; Source = 'windows-default-route-ipv4' })
     }
 
-    $resolver = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf 2>/dev/null"
+    $resolver = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command "grep -m1 '^nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null | tr -s '[:space:]' ' ' | cut -d' ' -f2"
     if ($resolver.ExitCode -eq 0) {
         $resolverHost = (($resolver.Output | Select-Object -First 1) -as [string]).Trim()
         if (-not [string]::IsNullOrWhiteSpace($resolverHost)) {
@@ -165,22 +177,8 @@ function Test-OdysseusWslOllamaCandidate {
         [int]$TimeoutSec = 5
     )
 
-    $probe = @'
-tmp="$(mktemp 2>/dev/null || echo /tmp/odysseus_probe_$$.log)"
-http_code="$(curl --noproxy "*" -sS -o /dev/null -w "%{http_code}" --max-time __TIMEOUT__ "http://__HOST__:11434/api/tags" 2>"$tmp")"
-curl_exit=$?
-err="$(tr '\n' ' ' <"$tmp" 2>/dev/null | sed 's/[[:space:]]\+/ /g' | sed 's/^ //; s/ $//')"
-rm -f "$tmp" 2>/dev/null
-if [ $curl_exit -eq 0 ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
-    echo "OK|$http_code"
-else
-    [ -z "$err" ] && err="curl_exit_${curl_exit}_http_${http_code}"
-    echo "FAIL|$http_code|$curl_exit|$err"
-fi
-'@
-
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $command = $probe.Replace('__HOST__', $Host).Replace('__TIMEOUT__', [string]$TimeoutSec)
+    $command = ('curl --noproxy "*" -sS -f --max-time {0} "http://{1}:11434/api/tags" >/dev/null 2>&1 && echo "OK|200" || echo "FAIL||1|curl_failed"' -f $TimeoutSec, $Host)
     $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $command
     $stopwatch.Stop()
 
@@ -206,7 +204,8 @@ function Invoke-OdysseusWslCompose {
         [string]$WslDistro,
         [Parameter(Mandatory = $true)]
         [string]$ComposeArgs,
-        [switch]$UseSudo
+        [switch]$UseSudo,
+        [switch]$StreamOutput
     )
 
     $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
@@ -224,11 +223,54 @@ if [ -f "$runtime_env" ]; then
     done
   fi
 fi
-__SUDO__docker compose "${compose_args[@]}" __ARGS__
+__SUDO__docker compose ${compose_args[@]} __ARGS__
 '@
 
-    $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs)
+    $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
+    if ($StreamOutput) {
+        & wsl.exe -d $WslDistro -- bash -lc $command
+        return [PSCustomObject]@{
+            ExitCode = $LASTEXITCODE
+            Output = @()
+        }
+    }
+
     return Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $command -LoginShell
+}
+
+function Invoke-OdysseusWslComposeCaptured {
+        param(
+                [Parameter(Mandatory = $true)]
+                [string]$WslDistro,
+                [Parameter(Mandatory = $true)]
+                [string]$ComposeArgs,
+                [switch]$UseSudo
+        )
+
+        $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+        $script = @'
+cd ~/odysseus 2>/dev/null || exit 1
+runtime_env="$HOME/.odysseus/runtime.env"
+compose_args=()
+if [ -f "$runtime_env" ]; then
+    compose_args+=(--env-file "$runtime_env")
+    compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ -n "$compose_files" ]; then
+        IFS=':' read -r -a cf <<< "$compose_files"
+        for f in "${cf[@]}"; do
+            [ -n "$f" ] && compose_args+=(-f "$f")
+        done
+    fi
+fi
+__SUDO__docker compose ${compose_args[@]} __ARGS__ 2>&1
+'@
+
+        $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
+        $output = & wsl.exe -d $WslDistro -- bash -lc $command
+        return [PSCustomObject]@{
+                ExitCode = $LASTEXITCODE
+                Output = @($output)
+        }
 }
 
 function Get-OdysseusComposeServiceStates {
@@ -317,6 +359,7 @@ Export-ModuleMember -Function @(
     'Get-OdysseusOllamaCandidates',
     'Test-OdysseusWslOllamaCandidate',
     'Invoke-OdysseusWslCompose',
+    'Invoke-OdysseusWslComposeCaptured',
     'Get-OdysseusComposeServiceStates',
     'Get-OdysseusFirewallRuleStatus'
 )

@@ -123,7 +123,7 @@ function Invoke-DiagnosticStage {
     }
 
     Write-Host '[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus diagnostics:' -ForegroundColor Yellow
-    & wsl.exe -d $wslDistro -- bash -lc "tr -d '\r' < '$linuxSourcePath' > ~/.odysseus/diag/bootstrap-check.sh && chmod +x ~/.odysseus/diag/bootstrap-check.sh && ~/.odysseus/diag/bootstrap-check.sh"
+    & wsl.exe -d $wslDistro -- bash -lc "mkdir -p ~/.odysseus/diag && tr -d '\r' < '$linuxSourcePath' > ~/.odysseus/diag/bootstrap-check.sh && chmod +x ~/.odysseus/diag/bootstrap-check.sh && ~/.odysseus/diag/bootstrap-check.sh"
 
     $resultsRaw = & wsl.exe -d $wslDistro -- bash -lc 'cat ~/.odysseus/diag/results.txt 2>/dev/null'
     if (-not $resultsRaw) {

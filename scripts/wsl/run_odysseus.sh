@@ -37,9 +37,24 @@ run_with_progress() {
     local frames='|/-\\'
     local frame=0
     local elapsed=0
+    local heartbeat_interval=15
+    local last_reported_line=""
+    local current_line=""
 
     while kill -0 "$pid" > /dev/null 2>&1; do
         printf '\r[WORKING] %s %s (%ss)' "$label" "${frames:frame:1}" "$elapsed"
+
+        if [ "$elapsed" -gt 0 ] && [ $((elapsed % heartbeat_interval)) -eq 0 ]; then
+            current_line=$(tail -n 1 "$log_file" 2>/dev/null | tr -d '\r')
+            echo
+            if [ -n "$current_line" ] && [ "$current_line" != "$last_reported_line" ]; then
+                echo "[INFO] ${label}: still running (${elapsed}s). Last output: ${current_line}"
+                last_reported_line="$current_line"
+            else
+                echo "[INFO] ${label}: still running (${elapsed}s)."
+            fi
+        fi
+
         sleep 1
         frame=$(((frame + 1) % 4))
         elapsed=$((elapsed + 1))
@@ -322,15 +337,19 @@ run_git_command() {
     local git_output
     local exit_code
 
-    set +e
     if command -v timeout > /dev/null 2>&1; then
-        git_output=$(timeout 180 git "$@" 2>&1)
-        exit_code=$?
+        if git_output=$(timeout 180 git "$@" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
     else
-        git_output=$(git "$@" 2>&1)
-        exit_code=$?
+        if git_output=$(git "$@" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
     fi
-    set -e
 
     if [ "$exit_code" -eq 0 ]; then
         return 0
@@ -638,7 +657,17 @@ HOST_OVERRIDE_FILE="$RUNTIME_DIR/docker-compose.host-mode.override.yml"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
+ODYSSEUS_REPO_SYNC_MODE=${ODYSSEUS_REPO_SYNC_MODE:-managed-ff}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
+
+case "$ODYSSEUS_REPO_SYNC_MODE" in
+    managed-clean|managed-ff|unmanaged)
+        ;;
+    *)
+        echo "[WARN] Unknown ODYSSEUS_REPO_SYNC_MODE='${ODYSSEUS_REPO_SYNC_MODE}'. Falling back to managed-ff."
+        ODYSSEUS_REPO_SYNC_MODE="managed-ff"
+        ;;
+esac
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
@@ -651,19 +680,31 @@ if [ ! -d "$TARGET_DIR" ]; then
 else
     cd "$TARGET_DIR"
 
-    echo "[INFO] Fetching latest metadata for origin/${ODYSSEUS_REPO_REF}..."
-    run_git_command "Fetch from origin/${ODYSSEUS_REPO_REF}" fetch origin "$ODYSSEUS_REPO_REF"
+    if [ "$ODYSSEUS_REPO_SYNC_MODE" = "unmanaged" ]; then
+        echo "[INFO] Repo sync mode is unmanaged; keeping existing ~/odysseus state without fetch/pull."
+    else
+        echo "[INFO] Fetching latest metadata for origin/${ODYSSEUS_REPO_REF}..."
+        run_git_command "Fetch from origin/${ODYSSEUS_REPO_REF}" fetch origin "$ODYSSEUS_REPO_REF"
 
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        local_changes=$(git status --short | head -n 20)
-        print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely. Current changes: ${local_changes}"
+        if [ "$ODYSSEUS_REPO_SYNC_MODE" = "managed-clean" ]; then
+            echo "[INFO] Repo sync mode is managed-clean; resetting ~/odysseus to origin/${ODYSSEUS_REPO_REF}."
+            run_git_command "Checkout branch ${ODYSSEUS_REPO_REF} from origin" checkout -B "$ODYSSEUS_REPO_REF" "origin/$ODYSSEUS_REPO_REF"
+            run_git_command "Hard reset branch ${ODYSSEUS_REPO_REF} to origin" reset --hard "origin/$ODYSSEUS_REPO_REF"
+            run_git_command "Clean untracked files from ~/odysseus" clean -fd
+            print_ok "Odysseus workspace force-synced to origin/${ODYSSEUS_REPO_REF}."
+        else
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+                local_changes=$(git status --short | head -n 20)
+                print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely. Current changes: ${local_changes}"
+            fi
+
+            run_git_command "Checkout branch ${ODYSSEUS_REPO_REF}" checkout "$ODYSSEUS_REPO_REF"
+
+            echo "[INFO] Fast-forwarding local workspace from origin/${ODYSSEUS_REPO_REF}..."
+            run_git_command "Fast-forward pull from origin/${ODYSSEUS_REPO_REF}" pull --ff-only origin "$ODYSSEUS_REPO_REF"
+            print_ok "Odysseus workspace updated."
+        fi
     fi
-
-    run_git_command "Checkout branch ${ODYSSEUS_REPO_REF}" checkout "$ODYSSEUS_REPO_REF"
-
-    echo "[INFO] Fast-forwarding local workspace from origin/${ODYSSEUS_REPO_REF}..."
-    run_git_command "Fast-forward pull from origin/${ODYSSEUS_REPO_REF}" pull --ff-only origin "$ODYSSEUS_REPO_REF"
-    print_ok "Odysseus workspace updated."
 fi
 
 mkdir -p "$RUNTIME_DIR"

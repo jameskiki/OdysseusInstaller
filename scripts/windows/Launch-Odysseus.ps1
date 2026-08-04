@@ -37,6 +37,7 @@ if (-not (Test-Path $BootstrapScript)) {
 $HostModeFile = Join-Path $ScriptRoot 'ODYSSEUS_HOST_MODE'
 $RepoRefFile = Join-Path $ScriptRoot 'ODYSSEUS_REPO_REF'
 $RebuildModeFile = Join-Path $ScriptRoot 'ODYSSEUS_REBUILD_MODE'
+$RepoSyncModeFile = Join-Path $ScriptRoot 'ODYSSEUS_REPO_SYNC_MODE'
 $TestModeFile = Join-Path $ScriptRoot 'ODYSSEUS_TEST_MODE'
 $IsHostMode = Test-Path $HostModeFile
 $IsTestMode = $TestMode -or (Test-Path $TestModeFile) -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
@@ -62,7 +63,16 @@ if ($IsTestMode) {
     $rebuildMode = 'never'
 }
 
+$repoSyncMode = 'managed-ff'
+if (Test-Path $RepoSyncModeFile) {
+    $rawRepoSyncMode = (Get-Content -Path $RepoSyncModeFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim().ToLowerInvariant()
+    if ($rawRepoSyncMode -in @('managed-clean', 'managed-ff', 'unmanaged')) {
+        $repoSyncMode = $rawRepoSyncMode
+    }
+}
+
 $env:ODYSSEUS_REPO_REF = $repoRef
+$env:ODYSSEUS_REPO_SYNC_MODE = $repoSyncMode
 switch ($rebuildMode) {
     'always' { $env:ODYSSEUS_REBUILD = '1' }
     'never' { $env:ODYSSEUS_REBUILD = '0' }
@@ -77,7 +87,7 @@ switch ($rebuildMode) {
     }
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -635,11 +645,12 @@ function Invoke-Step {
 }
 
 Invoke-Step `
-    -Intent "Applying local runtime preferences (branch/ref '$repoRef', rebuild mode '$rebuildMode')..." `
+    -Intent "Applying local runtime preferences (branch/ref '$repoRef', sync mode '$repoSyncMode', rebuild mode '$rebuildMode')..." `
     -Action {
         if ($IsTestMode) {
             Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
         }
+        Write-Host "[INFO] Repo sync mode: $repoSyncMode" -ForegroundColor DarkGray
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }

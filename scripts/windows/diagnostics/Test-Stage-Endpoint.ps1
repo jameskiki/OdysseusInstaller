@@ -26,7 +26,7 @@ if (-not (Test-Path $RuntimeChecksModulePath)) {
 Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
 
 $script:RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
-$script:EndpointTimeoutSec = 30
+$script:EndpointTimeoutSec = 90
 
 function Reset-DiagState {
     $script:DiagResults = [System.Collections.Generic.List[PSCustomObject]]::new()

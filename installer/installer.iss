@@ -51,6 +51,7 @@ var
   RepoRefPage: TWizardPage;
   RepoRefCombo: TNewComboBox;
   RepoRefStatusLabel: TNewStaticText;
+  RepoDefaultBranch: string;
   RebuildModePage: TInputOptionWizardPage;
   IPPage: TInputQueryWizardPage;
   RemoteReachabilityHintLabel: TNewStaticText;
@@ -133,10 +134,10 @@ begin
   if RepoRefCombo.ItemIndex >= 0 then
     Result := Trim(RepoRefCombo.Items[RepoRefCombo.ItemIndex])
   else
-    Result := 'main';
+    Result := RepoDefaultBranch;
 
   if Result = '' then
-    Result := 'main';
+    Result := RepoDefaultBranch;
 end;
 
 procedure PopulateRepoBranches;
@@ -152,6 +153,7 @@ begin
   if RepoBranchesLoaded then
     exit;
 
+  RepoDefaultBranch := 'main';
   RepoRefCombo.Items.Clear;
   RepoRefCombo.Items.Add('main');
   RepoRefCombo.ItemIndex := 0;
@@ -164,9 +166,13 @@ begin
   PsScript :=
     '$ErrorActionPreference = ''Stop''; ' +
     '$ProgressPreference = ''SilentlyContinue''; ' +
+    '$repo = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus''; ' +
+    '$default = $repo.default_branch; ' +
+    'if (-not $default) { $default = ''main'' }; ' +
     '$resp = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus/branches?per_page=100''; ' +
     '$names = @($resp | ForEach-Object { $_.name } | Where-Object { $_ } | Sort-Object -Unique); ' +
-    'if ($names.Count -eq 0) { $names = @(''main'') }; ' +
+    'if ($names.Count -eq 0) { $names = @($default) }; ' +
+    '"__DEFAULT__=$default" | Out-File -Encoding ascii -FilePath ''' + TempFile + '''; ' +
     '$names | Out-File -Encoding ascii -FilePath ''' + TempFile + '''';
 
   FetchExitCode := RunPowerShellExitCheck(PsScript);
@@ -178,6 +184,12 @@ begin
       BranchName := Trim(BranchLines[I]);
       if BranchName = '' then
         continue;
+
+      if Pos('__DEFAULT__=', BranchName) = 1 then begin
+        RepoDefaultBranch := Trim(Copy(BranchName, Length('__DEFAULT__=') + 1, Length(BranchName)));
+        continue;
+      end;
+
       if RepoRefCombo.Items.IndexOf(BranchName) >= 0 then
         continue;
 
@@ -192,18 +204,20 @@ begin
       RepoRefStatusLabel.Caption := 'No branches returned by GitHub. Defaulted to "main".';
     end
     else begin
-      if MainIndex >= 0 then
+      if RepoRefCombo.Items.IndexOf(RepoDefaultBranch) >= 0 then
+        RepoRefCombo.ItemIndex := RepoRefCombo.Items.IndexOf(RepoDefaultBranch)
+      else if MainIndex >= 0 then
         RepoRefCombo.ItemIndex := MainIndex
       else
         RepoRefCombo.ItemIndex := 0;
-      RepoRefStatusLabel.Caption := 'Branch list loaded from remote repository.';
+      RepoRefStatusLabel.Caption := 'Branch list loaded from remote repository. Default branch: ' + RepoDefaultBranch + '.';
     end;
   end
   else begin
     RepoRefCombo.Items.Clear;
-    RepoRefCombo.Items.Add('main');
+    RepoRefCombo.Items.Add(RepoDefaultBranch);
     RepoRefCombo.ItemIndex := 0;
-    RepoRefStatusLabel.Caption := 'Could not fetch remote branches right now. Defaulted to "main".';
+    RepoRefStatusLabel.Caption := 'Could not fetch remote branches right now. Defaulted to "' + RepoDefaultBranch + '".';
   end;
 
   RepoBranchesLoaded := True;
@@ -262,6 +276,7 @@ begin
     S := S + NewLine + 'Will be installed/configured:' + NewLine;
     S := S + '- Odysseus launcher and support scripts' + NewLine;
     S := S + '- Selected branch: ' + GetSelectedRepoRef + NewLine;
+    S := S + '- Repo sync mode: managed-clean (installer-managed reset to selected branch)' + NewLine;
     S := S + '- Firewall rule for inbound TCP 11434 (all profiles, WSL -> Ollama bridge)' + NewLine;
     if IsHostSelected then
       S := S + '- Firewall rule for inbound TCP 7000 (private/domain profiles)' + NewLine;
@@ -303,6 +318,8 @@ procedure InitializeWizard;
 var
   LinkLabel: TNewLinkLabel;
 begin
+  RepoDefaultBranch := 'main';
+
   WizardForm.LicenseMemo.Height := WizardForm.LicenseMemo.Height - ScaleY(24);
   WizardForm.LicenseAcceptedRadio.Top := WizardForm.LicenseAcceptedRadio.Top - ScaleY(24);
   WizardForm.LicenseNotAcceptedRadio.Top := WizardForm.LicenseNotAcceptedRadio.Top - ScaleY(24);
@@ -575,6 +592,7 @@ var
   HostModeFile: string;
   RepoRefFile: string;
   RebuildModeFile: string;
+  RepoSyncModeFile: string;
   SelectedRepoRef: string;
   SelectedRebuildMode: string;
 begin
@@ -588,6 +606,9 @@ begin
 
     RebuildModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE';
     SaveStringToFile(RebuildModeFile, SelectedRebuildMode, False);
+
+    RepoSyncModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_SYNC_MODE';
+    SaveStringToFile(RepoSyncModeFile, 'managed-clean', False);
 
     if IsHostSelected then begin
       HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
