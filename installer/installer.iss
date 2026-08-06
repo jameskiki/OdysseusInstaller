@@ -172,8 +172,8 @@ begin
     '$resp = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus/branches?per_page=100''; ' +
     '$names = @($resp | ForEach-Object { $_.name } | Where-Object { $_ } | Sort-Object -Unique); ' +
     'if ($names.Count -eq 0) { $names = @($default) }; ' +
-    '"__DEFAULT__=$default" | Out-File -Encoding ascii -FilePath ''' + TempFile + '''; ' +
-    '$names | Out-File -Encoding ascii -FilePath ''' + TempFile + '''';
+    '(''__DEFAULT__='' + $default) | Out-File -Encoding ascii -FilePath ''' + TempFile + '''; ' +
+    '$names | Out-File -Encoding ascii -Append -FilePath ''' + TempFile + '''';
 
   FetchExitCode := RunPowerShellExitCheck(PsScript);
   if (FetchExitCode = 0) and LoadStringsFromFile(TempFile, BranchLines) then begin
