@@ -1,31 +1,12 @@
 Clear-Host
 $ErrorActionPreference = 'Stop'
 
-function Get-InstalledWslDistros {
-    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        return @()
-    }
-
-    $distros = & wsl.exe -l -q 2>$null
-    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$RuntimeChecksModulePath = Join-Path $ScriptRoot 'lib\Odysseus.RuntimeChecks.psm1'
+if (-not (Test-Path $RuntimeChecksModulePath)) {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required files."
 }
-
-function Resolve-UbuntuDistro {
-    $distros = Get-InstalledWslDistros
-
-    if ($distros -contains 'Ubuntu') {
-        return 'Ubuntu'
-    }
-
-    return ($distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1)
-}
-
-function Test-UbuntuInitialized {
-    param([Parameter(Mandatory = $true)][string]$Distro)
-
-    & wsl.exe -d $Distro -- bash -lc 'id -un >/dev/null 2>&1'
-    return ($LASTEXITCODE -eq 0)
-}
+Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
 
 function Invoke-UbuntuInstall {
     Write-Host "[INFO] Installing WSL2 with Ubuntu using: wsl --install -d Ubuntu" -ForegroundColor Yellow
@@ -47,11 +28,11 @@ if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     throw "wsl.exe is not available on this machine. In an elevated terminal, run 'wsl --install -d Ubuntu'. Reboot if prompted, then rerun this shortcut."
 }
 
-$ubuntuDistro = Resolve-UbuntuDistro
+$ubuntuDistro = Resolve-OdysseusUbuntuDistro -Distros (Get-OdysseusInstalledWslDistros)
 if (-not $ubuntuDistro) {
     Invoke-UbuntuInstall
 
-    $ubuntuDistro = Resolve-UbuntuDistro
+    $ubuntuDistro = Resolve-OdysseusUbuntuDistro -Distros (Get-OdysseusInstalledWslDistros)
     if (-not $ubuntuDistro) {
         Write-Host "" 
         Write-Host "[NEXT STEP] Ubuntu was not detected yet. This usually means a reboot is required." -ForegroundColor Yellow
@@ -60,13 +41,13 @@ if (-not $ubuntuDistro) {
     }
 }
 
-if (-not (Test-UbuntuInitialized -Distro $ubuntuDistro)) {
+if (-not (Test-OdysseusUbuntuInitialized -WslDistro $ubuntuDistro)) {
     Write-Host "" 
     Write-Host "[INFO] Ubuntu first-run setup is not complete." -ForegroundColor Yellow
     Write-Host "A Linux terminal will open now. Complete Linux username/password setup, then close it." -ForegroundColor Yellow
     & wsl.exe -d $ubuntuDistro
 
-    if (-not (Test-UbuntuInitialized -Distro $ubuntuDistro)) {
+    if (-not (Test-OdysseusUbuntuInitialized -WslDistro $ubuntuDistro)) {
         throw "Ubuntu first-run setup is still incomplete. Launch 'wsl -d $ubuntuDistro' again, finish Linux username/password creation, then rerun this shortcut."
     }
 }

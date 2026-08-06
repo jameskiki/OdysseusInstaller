@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
-set -e
+set -Ee -o pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/false
+
+RUNTIME_LOG_DIR="$HOME/.odysseus/logs"
+mkdir -p "$RUNTIME_LOG_DIR"
+BOOTSTRAP_LOG_FILE="${ODYSSEUS_BOOTSTRAP_LOG:-$RUNTIME_LOG_DIR/bootstrap-$(date +%Y%m%d-%H%M%S).log}"
+touch "$BOOTSTRAP_LOG_FILE" 2>/dev/null || true
+ln -sfn "$BOOTSTRAP_LOG_FILE" "$RUNTIME_LOG_DIR/latest-bootstrap.log" 2>/dev/null || true
+exec > >(tee -a "$BOOTSTRAP_LOG_FILE") 2>&1
+echo "[INFO] Bootstrap log: $BOOTSTRAP_LOG_FILE"
 
 print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
+
+handle_unexpected_error() {
+    local exit_code="$1"
+    local line_no="$2"
+    local failed_command="$3"
+    print_fail "Unexpected bootstrap error (exit ${exit_code}) at line ${line_no} while running: ${failed_command}"
+}
+
+trap 'handle_unexpected_error $? $LINENO "$BASH_COMMAND"' ERR
 
 run_with_progress() {
     local label="$1"
@@ -18,9 +37,24 @@ run_with_progress() {
     local frames='|/-\\'
     local frame=0
     local elapsed=0
+    local heartbeat_interval=15
+    local last_reported_line=""
+    local current_line=""
 
     while kill -0 "$pid" > /dev/null 2>&1; do
         printf '\r[WORKING] %s %s (%ss)' "$label" "${frames:frame:1}" "$elapsed"
+
+        if [ "$elapsed" -gt 0 ] && [ $((elapsed % heartbeat_interval)) -eq 0 ]; then
+            current_line=$(tail -n 1 "$log_file" 2>/dev/null | tr -d '\r')
+            echo
+            if [ -n "$current_line" ] && [ "$current_line" != "$last_reported_line" ]; then
+                echo "[INFO] ${label}: still running (${elapsed}s). Last output: ${current_line}"
+                last_reported_line="$current_line"
+            else
+                echo "[INFO] ${label}: still running (${elapsed}s)."
+            fi
+        fi
+
         sleep 1
         frame=$(((frame + 1) % 4))
         elapsed=$((elapsed + 1))
@@ -31,9 +65,10 @@ run_with_progress() {
     printf '\r%-100s\r' ''
 
     if [ "$exit_code" -ne 0 ]; then
+        echo "[INFO] Command failed: $*"
+        echo "[INFO] Full command log: $log_file"
         echo "[INFO] Last installer output:"
-        tail -n 20 "$log_file" || true
-        rm -f "$log_file"
+        tail -n 40 "$log_file" || true
         return "$exit_code"
     fi
 
@@ -124,17 +159,13 @@ ensure_dpkg_consistent() {
 
 audit_ollama_gateway() {
     local gateway_host="$1"
-    local candidates="$2"
     local url="http://${gateway_host}:11434/api/tags"
     local curl_output
     local curl_exit
 
     echo "[INFO] Auditing Ollama reachability at ${url}"
-    if [ -n "$candidates" ]; then
-        echo "[INFO] Host candidates tested: ${candidates}"
-    fi
     set +e
-    curl_output=$(curl -sS --connect-timeout 2 --max-time 4 -w 'HTTP_STATUS:%{http_code}' "$url" 2>&1)
+    curl_output=$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 4 -w 'HTTP_STATUS:%{http_code}' "$url" 2>&1)
     curl_exit=$?
     set -e
 
@@ -145,13 +176,13 @@ audit_ollama_gateway() {
 
     case "$curl_exit" in
         7)
-            print_fail "Ollama is not accepting connections at ${url}. Check that Windows Ollama is running and bound to 0.0.0.0:11434. Candidates: ${candidates:-none}."
+            print_fail "Ollama is not accepting connections at ${url}. Check that Windows Ollama is running and bound to 0.0.0.0:11434."
             ;;
         28)
-            print_fail "Ollama timed out at ${url}. Check Windows firewall rules and WSL-to-host connectivity. Candidates: ${candidates:-none}."
+            print_fail "Ollama timed out at ${url}. Check Windows firewall rules and WSL-to-host connectivity."
             ;;
         *)
-            print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking. Candidates: ${candidates:-none}."
+            print_fail "Ollama audit failed for ${url} (curl exit ${curl_exit}). Check Windows Ollama binding, firewall, and host networking."
             ;;
     esac
 }
@@ -160,18 +191,76 @@ is_ollama_reachable() {
     local host="$1"
     local url="http://${host}:11434/api/tags"
 
-    curl -sS --connect-timeout 2 --max-time 4 -f "$url" > /dev/null 2>&1
+    curl --noproxy '*' -sS --connect-timeout 2 --max-time 4 -f "$url" > /dev/null 2>&1
+}
+
+probe_ollama_host() {
+    local host="$1"
+    local url="http://${host}:11434/api/tags"
+    local curl_output
+    local curl_exit
+    local http_status
+
+    ODYSSEUS_OLLAMA_LAST_PROBE_REASON=""
+
+    set +e
+    curl_output=$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 4 -w 'HTTP_STATUS:%{http_code}' "$url" 2>&1)
+    curl_exit=$?
+    set -e
+
+    if [ "$curl_exit" -eq 0 ] && printf '%s' "$curl_output" | grep -q 'HTTP_STATUS:200'; then
+        return 0
+    fi
+
+    http_status=$(printf '%s' "$curl_output" | sed -n 's/.*HTTP_STATUS:\([0-9][0-9][0-9]\).*/\1/p' | tail -n 1)
+    case "$curl_exit" in
+        7)
+            ODYSSEUS_OLLAMA_LAST_PROBE_REASON="connection failed (curl exit 7)"
+            ;;
+        28)
+            ODYSSEUS_OLLAMA_LAST_PROBE_REASON="timed out (curl exit 28)"
+            ;;
+        *)
+            if [ -n "$http_status" ]; then
+                ODYSSEUS_OLLAMA_LAST_PROBE_REASON="HTTP status ${http_status}"
+            else
+                ODYSSEUS_OLLAMA_LAST_PROBE_REASON="curl exit ${curl_exit}"
+            fi
+            ;;
+    esac
+
+    return 1
 }
 
 resolve_windows_ollama_host() {
     local candidate
+    local windows_default_route_ipv4
     local candidates=()
-    local attempted=""
-    local attempted_csv=""
+    local failure_reason
+
+    ODYSSEUS_WINDOWS_GATEWAY_IP=""
+    ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED=""
+    ODYSSEUS_OLLAMA_CANDIDATE_FAILURES=""
 
     # Allow advanced users to force a known-good host endpoint explicitly.
     if [ -n "${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}" ]; then
         candidates+=("${ODYSSEUS_WINDOWS_HOST_OVERRIDE}")
+    fi
+
+    # Prefer the Windows adapter used for the default route when available.
+    windows_default_route_ipv4=$(powershell.exe -NoProfile -Command "\
+\$route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |\
+    Where-Object { \$_.State -eq 'Alive' -and \$_.NextHop -ne '0.0.0.0' } |\
+    Sort-Object RouteMetric, InterfaceMetric |\
+    Select-Object -First 1;\
+if (\$route) {\
+    Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex \$route.InterfaceIndex -ErrorAction SilentlyContinue |\
+        Where-Object { \$_.IPAddress -notmatch '^127\\.' -and \$_.IPAddress -notmatch '^169\\.254\\.' -and \$_.PrefixOrigin -ne 'WellKnown' } |\
+        Sort-Object SkipAsSource |\
+        Select-Object -First 1 -ExpandProperty IPAddress\
+}" 2>/dev/null | tr -d '\r' | head -n 1)
+    if [ -n "$windows_default_route_ipv4" ]; then
+        candidates+=("$windows_default_route_ipv4")
     fi
 
     # WSL's synthetic DNS server can be the right bridge on some setups.
@@ -189,6 +278,7 @@ resolve_windows_ollama_host() {
     # host.docker.internal can work across Docker/WSL setups and keeps .env portable.
     candidates+=("host.docker.internal")
 
+    local attempted=""
     for candidate in "${candidates[@]}"; do
         if [ -z "$candidate" ]; then
             continue
@@ -200,21 +290,29 @@ resolve_windows_ollama_host() {
                 ;;
         esac
         attempted="${attempted}|${candidate}"
-        if [ -z "$attempted_csv" ]; then
-            attempted_csv="$candidate"
+        if [ -n "$ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED" ]; then
+            ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED}, ${candidate}"
         else
-            attempted_csv="${attempted_csv}, ${candidate}"
+            ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="${candidate}"
         fi
 
-        if is_ollama_reachable "$candidate"; then
+        if probe_ollama_host "$candidate"; then
             ODYSSEUS_WINDOWS_GATEWAY_IP="$candidate"
-            ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="$attempted_csv"
             return 0
+        fi
+
+        failure_reason="$ODYSSEUS_OLLAMA_LAST_PROBE_REASON"
+        if [ -z "$failure_reason" ]; then
+            failure_reason="probe failed"
+        fi
+
+        if [ -n "$ODYSSEUS_OLLAMA_CANDIDATE_FAILURES" ]; then
+            ODYSSEUS_OLLAMA_CANDIDATE_FAILURES="${ODYSSEUS_OLLAMA_CANDIDATE_FAILURES}; ${candidate}: ${failure_reason}"
+        else
+            ODYSSEUS_OLLAMA_CANDIDATE_FAILURES="${candidate}: ${failure_reason}"
         fi
     done
 
-    ODYSSEUS_WINDOWS_GATEWAY_IP=""
-    ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED="$attempted_csv"
     return 1
 }
 
@@ -230,6 +328,40 @@ run_apt_update() {
     else
         sudo apt-get update "${apt_args[@]}"
     fi
+}
+
+run_git_command() {
+    local operation_label="$1"
+    shift
+
+    local git_output
+    local exit_code
+
+    if command -v timeout > /dev/null 2>&1; then
+        if git_output=$(timeout 180 git "$@" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+    else
+        if git_output=$(git "$@" 2>&1); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 137 ]; then
+        print_fail "${operation_label} timed out after 180 seconds. Check network/VPN/proxy access to github.com and rerun."
+    fi
+
+    local tail_output
+    tail_output=$(printf '%s\n' "$git_output" | tail -n 30)
+    print_fail "${operation_label} failed. Git output: ${tail_output}"
 }
 
 wait_for_docker() {
@@ -298,39 +430,67 @@ upsert_env_key() {
     fi
 }
 
-configure_compose_files() {
+compose_args_from_runtime() {
     local env_file="$1"
-    local compose_files="docker-compose.yml"
+    local target_dir="$2"
+    local compose_files
+    local compose_file
+    local args=(--env-file "$env_file")
+
+    compose_files=$(grep '^COMPOSE_FILE=' "$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ -z "$compose_files" ]; then
+        args+=(-f "$target_dir/docker-compose.yml")
+        printf '%s\n' "${args[@]}"
+        return 0
+    fi
+
+    IFS=':' read -r -a compose_file_list <<< "$compose_files"
+    for compose_file in "${compose_file_list[@]}"; do
+        if [ -n "$compose_file" ]; then
+            args+=(-f "$compose_file")
+        fi
+    done
+
+    printf '%s\n' "${args[@]}"
+}
+
+configure_compose_files_runtime() {
+    local env_file="$1"
+    local target_dir="$2"
+    local host_override_path="$3"
+    local compose_files="$target_dir/docker-compose.yml"
 
     if command -v nvidia-smi > /dev/null 2>&1; then
-        compose_files="${compose_files}:docker-compose.gpu-nvidia.yml"
+        compose_files="${compose_files}:$target_dir/docker-compose.gpu-nvidia.yml"
     fi
 
     if [ "${ODYSSEUS_HOST_MODE:-0}" = "1" ]; then
-        cat > docker-compose.host-mode.override.yml <<'HOSTEOF'
+        cat > "$host_override_path" <<'HOSTEOF'
 services:
   odysseus:
     ports:
       - "0.0.0.0:7000:7000"
 HOSTEOF
-        compose_files="${compose_files}:docker-compose.host-mode.override.yml"
+        compose_files="${compose_files}:$host_override_path"
+    else
+        rm -f "$host_override_path"
     fi
 
     upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
 }
 
-configure_gateway_endpoints() {
+configure_gateway_endpoints_runtime() {
     local env_file="$1"
     local gateway_host
 
     if ! resolve_windows_ollama_host; then
-        print_fail "Unable to resolve a reachable Windows host endpoint for Ollama. Candidates tested: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}. Verify WSL networking and Windows Ollama binding, then rerun."
+        print_fail "Unable to resolve a reachable Windows host endpoint for Ollama. Candidates: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}. Probe results: ${ODYSSEUS_OLLAMA_CANDIDATE_FAILURES:-none}. Verify Windows Ollama binding/firewall or set ODYSSEUS_WINDOWS_HOST_OVERRIDE, then rerun."
         return 1
     fi
 
     gateway_host="$ODYSSEUS_WINDOWS_GATEWAY_IP"
     if [ -z "$gateway_host" ]; then
-        print_fail "Resolved an empty Windows host endpoint for Ollama. Candidates tested: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}."
+        print_fail "Resolved Windows host endpoint is empty after successful probe. This is unexpected; rerun and capture logs."
         return 1
     fi
 
@@ -340,13 +500,48 @@ configure_gateway_endpoints() {
     upsert_env_key "EMBEDDING_URL" "http://${gateway_host}:11434/v1/embeddings" "$env_file"
 
     export ODYSSEUS_WINDOWS_GATEWAY_IP="$gateway_host"
-    export ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED
 }
 
-trap 'if [ $? -ne 0 ]; then print_fail "Pipeline broken on the last task."; fi' EXIT
+get_port_7000_listeners() {
+    if command -v ss > /dev/null 2>&1; then
+        sudo ss -H -ltnp 'sport = :7000' 2>/dev/null || true
+        return 0
+    fi
+
+    if command -v lsof > /dev/null 2>&1; then
+        sudo lsof -nP -iTCP:7000 -sTCP:LISTEN 2>/dev/null || true
+        return 0
+    fi
+
+    echo "Listener diagnostics unavailable (neither 'ss' nor 'lsof' found)."
+    return 0
+}
+
+ensure_port_7000_available_for_compose() {
+    local listeners
+    listeners="$(get_port_7000_listeners)"
+
+    if [ -z "$listeners" ]; then
+        return 0
+    fi
+
+    # Allow an existing healthy Odysseus service for idempotent relaunches.
+    if sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps --services --filter status=running 2>/dev/null | grep -qx 'odysseus'; then
+        echo "[INFO] Port 7000 is already bound by a running Odysseus service for this compose profile."
+        return 0
+    fi
+
+    echo "[INFO] Port 7000 listener snapshot:"
+    printf '%s\n' "$listeners"
+    print_fail "Port 7000 is already in use by another process. Stop the conflicting listener and rerun. Helpful commands: 'sudo ss -ltnp \'sport = :7000\'' and 'sudo docker ps --format \"table {{.Names}}\\t{{.Ports}}\"'."
+}
 
 print_step "Refreshing sudo credentials for package management..."
-sudo -v || print_fail "Sudo authentication failed."
+echo "[INFO] If prompted, enter your Ubuntu password and press Enter (characters will not be shown)."
+if ! sudo -v -p '[SUDO] Enter Ubuntu password for Odysseus bootstrap: '; then
+    print_fail "Sudo authentication failed. Verify your Ubuntu password and rerun the launcher."
+fi
+print_ok "Sudo credential ticket is active."
 
 print_step "Waiting for package manager locks to clear..."
 wait_for_apt_unlock || print_fail "Timed out waiting for apt/dpkg lock files."
@@ -456,48 +651,113 @@ fi
 
 print_step "Synchronizing the Odysseus project source workspace..."
 TARGET_DIR="$HOME/odysseus"
+RUNTIME_DIR="$HOME/.odysseus"
+RUNTIME_ENV="$RUNTIME_DIR/runtime.env"
+HOST_OVERRIDE_FILE="$RUNTIME_DIR/docker-compose.host-mode.override.yml"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
-ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-main}
+ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-dev}
+ODYSSEUS_REPO_SYNC_MODE=${ODYSSEUS_REPO_SYNC_MODE:-managed-ff}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
+
+case "$ODYSSEUS_REPO_SYNC_MODE" in
+    managed-clean|managed-ff|unmanaged)
+        ;;
+    *)
+        echo "[WARN] Unknown ODYSSEUS_REPO_SYNC_MODE='${ODYSSEUS_REPO_SYNC_MODE}'. Falling back to managed-ff."
+        ODYSSEUS_REPO_SYNC_MODE="managed-ff"
+        ;;
+esac
 
 if [ ! -d "$TARGET_DIR" ]; then
     FIRST_BOOT=true
-    if git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
+    if run_with_progress "Cloning Odysseus branch ${ODYSSEUS_REPO_REF}" git clone --branch "$ODYSSEUS_REPO_REF" https://github.com/pewdiepie-archdaemon/odysseus.git "$TARGET_DIR"; then
         cd "$TARGET_DIR"
     else
         print_fail "Failed to clone Odysseus branch '$ODYSSEUS_REPO_REF'. Verify the branch exists and rerun."
     fi
-    cp .env.example .env
     print_ok "Odysseus workspace initialized."
 else
     cd "$TARGET_DIR"
-    git fetch origin "$ODYSSEUS_REPO_REF"
-    git checkout "$ODYSSEUS_REPO_REF"
-    if git pull --ff-only origin "$ODYSSEUS_REPO_REF"; then
-        print_ok "Odysseus workspace updated."
+
+    if [ "$ODYSSEUS_REPO_SYNC_MODE" = "unmanaged" ]; then
+        echo "[INFO] Repo sync mode is unmanaged; keeping existing ~/odysseus state without fetch/pull."
     else
-        print_fail "Odysseus workspace update failed because local checkout diverged from origin/$ODYSSEUS_REPO_REF. Resolve git state in ~/odysseus and rerun."
+        echo "[INFO] Fetching latest metadata for origin/${ODYSSEUS_REPO_REF}..."
+        run_git_command "Fetch from origin/${ODYSSEUS_REPO_REF}" fetch origin "$ODYSSEUS_REPO_REF"
+
+        if [ "$ODYSSEUS_REPO_SYNC_MODE" = "managed-clean" ]; then
+            echo "[INFO] Repo sync mode is managed-clean; resetting ~/odysseus to origin/${ODYSSEUS_REPO_REF}."
+            run_git_command "Checkout branch ${ODYSSEUS_REPO_REF} from origin" checkout -B "$ODYSSEUS_REPO_REF" "origin/$ODYSSEUS_REPO_REF"
+            run_git_command "Hard reset branch ${ODYSSEUS_REPO_REF} to origin" reset --hard "origin/$ODYSSEUS_REPO_REF"
+            run_git_command "Clean untracked files from ~/odysseus" clean -fd
+            print_ok "Odysseus workspace force-synced to origin/${ODYSSEUS_REPO_REF}."
+        else
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+                local_changes=$(git status --short | head -n 20)
+                print_fail "Odysseus workspace has local changes in ~/odysseus. Commit/stash/discard local changes before relaunching so branch sync can run safely. Current changes: ${local_changes}"
+            fi
+
+            run_git_command "Checkout branch ${ODYSSEUS_REPO_REF}" checkout "$ODYSSEUS_REPO_REF"
+
+            echo "[INFO] Fast-forwarding local workspace from origin/${ODYSSEUS_REPO_REF}..."
+            run_git_command "Fast-forward pull from origin/${ODYSSEUS_REPO_REF}" pull --ff-only origin "$ODYSSEUS_REPO_REF"
+            print_ok "Odysseus workspace updated."
+        fi
     fi
-    if [ ! -f .env ]; then
-        cp .env.example .env
-        print_ok "Environment file created from the current template."
+fi
+
+mkdir -p "$RUNTIME_DIR"
+if [ ! -f "$RUNTIME_ENV" ]; then
+    if [ -f "$TARGET_DIR/.env.example" ]; then
+        cp "$TARGET_DIR/.env.example" "$RUNTIME_ENV"
+        print_ok "Runtime environment initialized at $RUNTIME_ENV from .env.example."
+    else
+        : > "$RUNTIME_ENV"
+        print_ok "Runtime environment initialized at $RUNTIME_ENV."
     fi
 fi
 
 print_step "Applying host connectivity and compose profile settings..."
-configure_compose_files ".env"
-configure_gateway_endpoints ".env"
+configure_compose_files_runtime "$RUNTIME_ENV" "$TARGET_DIR" "$HOST_OVERRIDE_FILE"
+configure_gateway_endpoints_runtime "$RUNTIME_ENV"
 print_ok "Environment endpoints and compose profiles aligned."
 
 print_step "Auditing Windows-hosted Ollama reachability from WSL..."
-audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP" "${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-$ODYSSEUS_WINDOWS_GATEWAY_IP}"
+audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
 
 print_step "Deploying application containers..."
-if [ "$ODYSSEUS_REBUILD" = "1" ]; then
-    run_with_progress "Building and starting application containers" sudo docker compose up -d --build && print_ok "Containers rebuilt and active in background."
+mapfile -t COMPOSE_RUNTIME_ARGS < <(compose_args_from_runtime "$RUNTIME_ENV" "$TARGET_DIR")
+
+print_step "Validating Docker compose runtime configuration..."
+compose_config_log=$(mktemp /tmp/odysseus-compose-config.XXXXXX.log)
+if sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" config -q >"$compose_config_log" 2>&1; then
+    rm -f "$compose_config_log"
+    print_ok "Compose configuration is valid."
 else
-    run_with_progress "Starting application containers" sudo docker compose up -d && print_ok "Containers active in background (rebuild skipped)."
+    echo "[INFO] docker compose config validation output:"
+    cat "$compose_config_log" || true
+    print_fail "Compose configuration validation failed. Fix the compose/env configuration shown above and rerun."
+fi
+
+print_step "Preflight-checking local port 7000 availability before container startup..."
+ensure_port_7000_available_for_compose
+print_ok "Port 7000 preflight check passed."
+
+if [ "$ODYSSEUS_REBUILD" = "1" ]; then
+    if run_with_progress "Building and starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d --build; then
+        print_ok "Containers rebuilt and active in background."
+    else
+        compose_state=$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps 2>&1 || true)
+        print_fail "docker compose up --build failed. Review command log output above and compose state: ${compose_state}"
+    fi
+else
+    if run_with_progress "Starting application containers" sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" up -d; then
+        print_ok "Containers active in background (rebuild skipped)."
+    else
+        compose_state=$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" ps 2>&1 || true)
+        print_fail "docker compose up -d failed. Review command log output above and compose state: ${compose_state}"
+    fi
 fi
 
 print_step "Polling local network port 7000 to verify runtime status..."
@@ -511,7 +771,7 @@ until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/
     fi
     if [ $COUNT -ge $TIMEOUT ]; then
         echo ""
-        print_fail "Network handshake timeout after ${TIMEOUT}s. Check the Odysseus container logs with: sudo docker compose logs -f odysseus"
+        print_fail "Network handshake timeout after ${TIMEOUT}s. Check Odysseus container logs from ~/odysseus using your runtime compose profile."
     fi
     sleep 2
 done
@@ -520,7 +780,7 @@ print_ok "Application socket online after ${COUNT}s."
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"
-    odysseus_logs="$(sudo docker compose logs odysseus)"
+    odysseus_logs="$(sudo docker compose "${COMPOSE_RUNTIME_ARGS[@]}" logs odysseus)"
     if ! printf '%s\n' "$odysseus_logs" | grep -i "password" > "$password_log"; then
         {
             echo "No explicit password line was found in odysseus logs. Recent startup logs are included below:"
@@ -545,4 +805,3 @@ if [ "$FIRST_BOOT" = true ]; then
     read -p "Press [Enter] once you have copied your password to launch Edge..."
 fi
 
-trap - EXIT

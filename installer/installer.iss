@@ -25,6 +25,7 @@ Source: "..\scripts\windows\Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignor
 Source: "..\scripts\windows\Prepare-WslForOdysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\wsl\run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\lib\Odysseus.RuntimeChecks.psm1"; DestDir: "{app}\lib"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
 Name: "{autodesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
@@ -37,16 +38,29 @@ Name: "{autodesktop}\Connect to Shared Odysseus"; Filename: "explorer.exe"; Para
 [Run]
 ; Allow inbound access for shared-host mode.
 Filename: "cmd.exe"; Parameters: "/c ""netsh.exe advfirewall firewall add rule name=""Odysseus AI Network Host"" dir=in action=allow protocol=TCP localport=7000 profile=private,domain || (echo Firewall configuration failed && pause)"""; StatusMsg: "Configuring network hosting permissions and firewall exceptions..."; Check: IsHostSelected
+; Allow WSL-to-Windows Ollama traffic for local deployments.
+Filename: "cmd.exe"; Parameters: "/c ""netsh.exe advfirewall firewall delete rule name=""Odysseus Ollama WSL Bridge"" 1>nul 2>nul & netsh.exe advfirewall firewall add rule name=""Odysseus Ollama WSL Bridge"" dir=in action=allow protocol=TCP localport=11434 profile=any || (echo Ollama firewall bridge configuration failed && pause)"""; StatusMsg: "Configuring Ollama WSL bridge firewall permissions..."; Check: IsLocalInstallation
 
 [Code]
 var
   DeploymentPage: TWizardPage;
   LocalInstallRadio: TRadioButton;
   RemoteInstallRadio: TRadioButton;
+  GpuSupportNoteLabel: TNewStaticText;
   HostCheckBox: TNewCheckBox;
-  RepoRefPage: TInputQueryWizardPage;
+  RepoRefPage: TWizardPage;
+  RepoRefCombo: TNewComboBox;
+  RepoRefStatusLabel: TNewStaticText;
+  RepoDefaultBranch: string;
   RebuildModePage: TInputOptionWizardPage;
   IPPage: TInputQueryWizardPage;
+  RemoteReachabilityHintLabel: TNewStaticText;
+  RepoBranchesLoaded: Boolean;
+  LocalPreflightChecked: Boolean;
+  LocalPreflightHasWsl: Boolean;
+  LocalPreflightHasUbuntu: Boolean;
+  LocalPreflightHasOllama: Boolean;
+  LocalPreflightHasWinget: Boolean;
   UninstallCleanupPrompted: Boolean;
   UninstallFreshMode: Boolean;
   RemoveLocalRuntimeData: Boolean;
@@ -58,11 +72,247 @@ var
   DisableWslRuntime: Boolean;
   RemoveResidualInstallFiles: Boolean;
 
+function IsLocalInstallation: Boolean; forward;
+function IsRemoteInstallation: Boolean; forward;
+function IsHostSelected: Boolean; forward;
+
 procedure OnDeploymentTypeChange(Sender: TObject);
 begin
   HostCheckBox.Enabled := LocalInstallRadio.Checked;
   if not HostCheckBox.Enabled then
     HostCheckBox.Checked := False;
+end;
+
+function RunPowerShellExitCheck(const Script: string): Integer;
+var
+  ResultCode: Integer;
+  ScriptFile: string;
+begin
+  { Run via a temp script file so embedded quotes can never break the command line. }
+  ScriptFile := ExpandConstant('{tmp}\odysseus-check.ps1');
+  if not SaveStringToFile(ScriptFile, Script, False) then begin
+    Result := -1;
+    exit;
+  end;
+
+  if Exec(
+    ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptFile + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := ResultCode
+  else
+    Result := -1;
+end;
+
+procedure RefreshLocalPreflightChecks;
+var
+  WslCode: Integer;
+  UbuntuCode: Integer;
+  OllamaCode: Integer;
+  WingetCode: Integer;
+begin
+  if LocalPreflightChecked then
+    exit;
+
+  WslCode := RunPowerShellExitCheck('if (Get-Command wsl -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }');
+  LocalPreflightHasWsl := (WslCode = 0);
+
+  UbuntuCode := RunPowerShellExitCheck(
+    'if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) { exit 2 }; ' +
+    '[Console]::OutputEncoding = [System.Text.Encoding]::Unicode; ' +
+    '$distros = (wsl -l -q) 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ }; ' +
+    'if ($distros | Where-Object { $_ -match ''^Ubuntu(-.*)?$'' }) { exit 0 } else { exit 1 }');
+  LocalPreflightHasUbuntu := (UbuntuCode = 0);
+
+  OllamaCode := RunPowerShellExitCheck(
+    '$cmd = Get-Command ollama.exe -ErrorAction SilentlyContinue; ' +
+    'if ($cmd) { exit 0 }; ' +
+    '$paths = @(Join-Path $env:LOCALAPPDATA ''Programs\Ollama\ollama.exe'', Join-Path $env:ProgramFiles ''Ollama\ollama.exe'', Join-Path ${env:ProgramFiles(x86)} ''Ollama\ollama.exe''); ' +
+    'foreach ($p in $paths) { if ($p -and (Test-Path $p)) { exit 0 } }; exit 1');
+  LocalPreflightHasOllama := (OllamaCode = 0);
+
+  WingetCode := RunPowerShellExitCheck('if (Get-Command winget -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }');
+  LocalPreflightHasWinget := (WingetCode = 0);
+
+  LocalPreflightChecked := True;
+end;
+
+function GetSelectedRepoRef: string;
+begin
+  if RepoRefCombo.ItemIndex >= 0 then
+    Result := Trim(RepoRefCombo.Items[RepoRefCombo.ItemIndex])
+  else
+    Result := RepoDefaultBranch;
+
+  if Result = '' then
+    Result := RepoDefaultBranch;
+end;
+
+procedure PopulateRepoBranches;
+var
+  TempFile: string;
+  PsScript: string;
+  FetchExitCode: Integer;
+  BranchLines: TArrayOfString;
+  I: Integer;
+  BranchName: string;
+  MainIndex: Integer;
+begin
+  if RepoBranchesLoaded then
+    exit;
+
+  RepoDefaultBranch := 'dev';
+  RepoRefCombo.Items.Clear;
+  RepoRefCombo.Items.Add('dev');
+  RepoRefCombo.ItemIndex := 0;
+  RepoRefStatusLabel.Caption := 'Loading remote branches from GitHub...';
+
+  TempFile := ExpandConstant('{tmp}\odysseus-branches.txt');
+  if FileExists(TempFile) then
+    DeleteFile(TempFile);
+
+  PsScript :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$ProgressPreference = ''SilentlyContinue''; ' +
+    '$repo = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus''; ' +
+    '$default = $repo.default_branch; ' +
+    'if (-not $default) { $default = ''dev'' }; ' +
+    '$resp = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus/branches?per_page=100''; ' +
+    '$names = @($resp | ForEach-Object { $_.name } | Where-Object { $_ } | Sort-Object -Unique); ' +
+    'if ($names.Count -eq 0) { $names = @($default) }; ' +
+    '(''__DEFAULT__='' + $default) | Out-File -Encoding ascii -FilePath ''' + TempFile + '''; ' +
+    '$names | Out-File -Encoding ascii -Append -FilePath ''' + TempFile + '''';
+
+  FetchExitCode := RunPowerShellExitCheck(PsScript);
+  if (FetchExitCode = 0) and LoadStringsFromFile(TempFile, BranchLines) then begin
+    RepoRefCombo.Items.Clear;
+    MainIndex := -1;
+
+    for I := 0 to GetArrayLength(BranchLines) - 1 do begin
+      BranchName := Trim(BranchLines[I]);
+      if BranchName = '' then
+        continue;
+
+      if Pos('__DEFAULT__=', BranchName) = 1 then begin
+        RepoDefaultBranch := Trim(Copy(BranchName, Length('__DEFAULT__=') + 1, Length(BranchName)));
+        continue;
+      end;
+
+      if RepoRefCombo.Items.IndexOf(BranchName) >= 0 then
+        continue;
+
+      RepoRefCombo.Items.Add(BranchName);
+      if BranchName = 'main' then
+        MainIndex := RepoRefCombo.Items.Count - 1;
+    end;
+
+    if (RepoRefCombo.Items.Count = 0) then begin
+      RepoRefCombo.Items.Add('dev');
+      RepoRefCombo.ItemIndex := 0;
+      RepoRefStatusLabel.Caption := 'No branches returned by GitHub. Defaulted to "dev".';
+    end
+    else begin
+      if RepoRefCombo.Items.IndexOf(RepoDefaultBranch) >= 0 then
+        RepoRefCombo.ItemIndex := RepoRefCombo.Items.IndexOf(RepoDefaultBranch)
+      else if MainIndex >= 0 then
+        RepoRefCombo.ItemIndex := MainIndex
+      else
+        RepoRefCombo.ItemIndex := 0;
+      RepoRefStatusLabel.Caption := 'Branch list loaded from remote repository. Default branch: ' + RepoDefaultBranch + '.';
+    end;
+  end
+  else begin
+    RepoRefCombo.Items.Clear;
+    RepoRefCombo.Items.Add(RepoDefaultBranch);
+    RepoRefCombo.ItemIndex := 0;
+    RepoRefStatusLabel.Caption := 'Could not fetch remote branches right now. Defaulted to "' + RepoDefaultBranch + '".';
+  end;
+
+  RepoBranchesLoaded := True;
+end;
+
+procedure UpdateRemoteReachabilityHint;
+var
+  RemoteIp: string;
+begin
+  RemoteIp := Trim(IPPage.Values[0]);
+  if RemoteIp <> '' then
+    RemoteReachabilityHintLabel.Caption := 'Shared Odysseus URL from this PC: http://' + RemoteIp + ':7000'
+  else
+    RemoteReachabilityHintLabel.Caption := 'Shared Odysseus URL from this PC: http://<host-ip>:7000';
+end;
+
+procedure OnRemoteIpChanged(Sender: TObject);
+begin
+  UpdateRemoteReachabilityHint;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = RepoRefPage.ID) and IsLocalInstallation then
+    PopulateRepoBranches;
+
+  if (CurPageID = IPPage.ID) and IsRemoteInstallation then
+    UpdateRemoteReachabilityHint;
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+var
+  S: string;
+  RemoteIp: string;
+begin
+  S := '';
+  S := S + 'Deployment mode:' + Space;
+  if IsLocalInstallation then
+    S := S + 'Local instance on this computer' + NewLine
+  else
+    S := S + 'Connect to shared network instance' + NewLine;
+
+  S := S + NewLine + 'Already present:' + NewLine;
+  if IsLocalInstallation then begin
+    RefreshLocalPreflightChecks;
+
+    if LocalPreflightHasWsl then
+      S := S + '- WSL runtime detected' + NewLine;
+    if LocalPreflightHasUbuntu then
+      S := S + '- Ubuntu WSL distro detected' + NewLine;
+    if LocalPreflightHasOllama then
+      S := S + '- Ollama installation detected' + NewLine;
+    if not (LocalPreflightHasWsl or LocalPreflightHasUbuntu or LocalPreflightHasOllama) then
+      S := S + '- No required local runtime dependencies detected yet' + NewLine;
+
+    S := S + NewLine + 'Will be installed/configured:' + NewLine;
+    S := S + '- Odysseus launcher and support scripts' + NewLine;
+    S := S + '- Selected branch: ' + GetSelectedRepoRef + NewLine;
+    S := S + '- Repo sync mode: managed-clean (installer-managed reset to selected branch)' + NewLine;
+    S := S + '- Firewall rule for inbound TCP 11434 (all profiles, WSL -> Ollama bridge)' + NewLine;
+    if IsHostSelected then
+      S := S + '- Firewall rule for inbound TCP 7000 (private/domain profiles)' + NewLine;
+
+    S := S + NewLine + 'Manual action required:' + NewLine;
+    if not LocalPreflightHasWsl then
+      S := S + '- Install WSL and Ubuntu using "Prepare WSL for Odysseus"' + NewLine;
+    if LocalPreflightHasWsl and (not LocalPreflightHasUbuntu) then
+      S := S + '- Add an Ubuntu distro in WSL using "Prepare WSL for Odysseus"' + NewLine;
+    if (not LocalPreflightHasOllama) and (not LocalPreflightHasWinget) then
+      S := S + '- Install Ollama manually from https://ollama.com/download' + NewLine;
+    if LocalPreflightHasOllama or LocalPreflightHasWinget then
+      S := S + '- No blocking manual actions detected' + NewLine;
+  end
+  else begin
+    RemoteIp := Trim(IPPage.Values[0]);
+    if RemoteIp = '' then
+      RemoteIp := '<host-ip>';
+
+    S := S + '- Windows desktop and Start menu shortcut for remote access' + NewLine;
+    S := S + NewLine + 'Will be installed/configured:' + NewLine;
+    S := S + '- Remote shortcut target: http://' + RemoteIp + ':7000' + NewLine;
+    S := S + NewLine + 'Manual action required:' + NewLine;
+    S := S + '- Confirm host machine is running Odysseus and reachable at the selected IP' + NewLine;
+  end;
+
+  S := S + NewLine + MemoDirInfo;
+  Result := S;
 end;
 
 procedure OnLicenseLinkClick(Sender: TObject; const Link: string; LinkType: TSysLinkType);
@@ -76,6 +326,8 @@ procedure InitializeWizard;
 var
   LinkLabel: TNewLinkLabel;
 begin
+  RepoDefaultBranch := 'dev';
+
   WizardForm.LicenseMemo.Height := WizardForm.LicenseMemo.Height - ScaleY(24);
   WizardForm.LicenseAcceptedRadio.Top := WizardForm.LicenseAcceptedRadio.Top - ScaleY(24);
   WizardForm.LicenseNotAcceptedRadio.Top := WizardForm.LicenseNotAcceptedRadio.Top - ScaleY(24);
@@ -93,7 +345,7 @@ begin
   
   LocalInstallRadio := TRadioButton.Create(DeploymentPage);
   LocalInstallRadio.Parent := DeploymentPage.Surface;
-  LocalInstallRadio.Caption := 'Run a local instance on my own computer (Requires Nvidia GPU or high CPU/RAM resources)';
+  LocalInstallRadio.Caption := 'Run a local instance on my own computer (Best with NVIDIA GPU; CPU mode also supported)';
   LocalInstallRadio.Font.Style := [fsBold];
   LocalInstallRadio.Left := ScaleX(8);
   LocalInstallRadio.Top := ScaleY(16);
@@ -101,11 +353,19 @@ begin
   LocalInstallRadio.Checked := True;
   LocalInstallRadio.OnClick := @OnDeploymentTypeChange;
 
+  GpuSupportNoteLabel := TNewStaticText.Create(DeploymentPage);
+  GpuSupportNoteLabel.Parent := DeploymentPage.Surface;
+  GpuSupportNoteLabel.Caption := 'Note: AMD GPU acceleration is not currently auto-detected in this installer. Local runs on unsupported GPUs may fall back to CPU mode.';
+  GpuSupportNoteLabel.Left := ScaleX(28);
+  GpuSupportNoteLabel.Top := LocalInstallRadio.Top + ScaleY(22);
+  GpuSupportNoteLabel.Width := DeploymentPage.SurfaceWidth - ScaleX(36);
+  GpuSupportNoteLabel.WordWrap := True;
+
   HostCheckBox := TNewCheckBox.Create(DeploymentPage);
   HostCheckBox.Parent := DeploymentPage.Surface;
   HostCheckBox.Caption := 'Act as Host: Allow other computers on the office network to connect to this machine';
   HostCheckBox.Left := ScaleX(28); 
-  HostCheckBox.Top := LocalInstallRadio.Top + ScaleY(24);
+  HostCheckBox.Top := GpuSupportNoteLabel.Top + GpuSupportNoteLabel.Height + ScaleY(6);
   HostCheckBox.Width := DeploymentPage.SurfaceWidth - ScaleX(32);
   HostCheckBox.Checked := False;
 
@@ -118,9 +378,24 @@ begin
   RemoteInstallRadio.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
   RemoteInstallRadio.OnClick := @OnDeploymentTypeChange;
 
-  RepoRefPage := CreateInputQueryPage(DeploymentPage.ID, 'Odysseus Version Selection', 'Choose which Odysseus branch or tag to use.', 'Leave this as "main" unless you were given a specific branch or release tag.');
-  RepoRefPage.Add('Git branch or tag:', False);
-  RepoRefPage.Values[0] := 'main';
+  RepoRefPage := CreateCustomPage(DeploymentPage.ID, 'Odysseus Version Selection', 'Choose which remote Odysseus branch to use.');
+
+  RepoRefCombo := TNewComboBox.Create(RepoRefPage);
+  RepoRefCombo.Parent := RepoRefPage.Surface;
+  RepoRefCombo.Style := csDropDownList;
+  RepoRefCombo.Left := ScaleX(8);
+  RepoRefCombo.Top := ScaleY(18);
+  RepoRefCombo.Width := RepoRefPage.SurfaceWidth - ScaleX(16);
+  RepoRefCombo.Items.Add('dev');
+  RepoRefCombo.ItemIndex := 0;
+
+  RepoRefStatusLabel := TNewStaticText.Create(RepoRefPage);
+  RepoRefStatusLabel.Parent := RepoRefPage.Surface;
+  RepoRefStatusLabel.Left := ScaleX(8);
+  RepoRefStatusLabel.Top := RepoRefCombo.Top + RepoRefCombo.Height + ScaleY(8);
+  RepoRefStatusLabel.Width := RepoRefPage.SurfaceWidth - ScaleX(16);
+  RepoRefStatusLabel.Caption := 'Branch list will be fetched from GitHub when this page opens.';
+  RepoRefStatusLabel.WordWrap := True;
 
   RebuildModePage := CreateInputOptionPage(RepoRefPage.ID, 'Container Rebuild Preference', 'Choose how Odysseus container rebuilds should be handled on launch.', 'Recommended default: Ask each launch.', True, False);
   RebuildModePage.Add('Ask each launch (recommended)');
@@ -131,6 +406,18 @@ begin
   IPPage := CreateInputQueryPage(RebuildModePage.ID, 'Shared Instance Network Location', 'Specify the target IP address of the hosting workstation.', 'Please enter the IPv4 address of the computer sharing Odysseus (e.g. 192.168.1.45):');
   IPPage.Add('Host IP Address:', False);
   IPPage.Values[0] := '';
+
+  RemoteReachabilityHintLabel := TNewStaticText.Create(IPPage);
+  RemoteReachabilityHintLabel.Parent := IPPage.Surface;
+  RemoteReachabilityHintLabel.Left := IPPage.Edits[0].Left;
+  RemoteReachabilityHintLabel.Top := IPPage.Edits[0].Top + IPPage.Edits[0].Height + ScaleY(8);
+  RemoteReachabilityHintLabel.Width := IPPage.SurfaceWidth - ScaleX(16);
+  RemoteReachabilityHintLabel.Caption := 'Shared Odysseus URL from this PC: http://<host-ip>:7000';
+  RemoteReachabilityHintLabel.WordWrap := True;
+  IPPage.Edits[0].OnChange := @OnRemoteIpChanged;
+
+  RepoBranchesLoaded := False;
+  LocalPreflightChecked := False;
 end;
 
 function IsLocalInstallation: Boolean;
@@ -175,6 +462,70 @@ begin
   if Result = '' then Result := '127.0.0.1';
 end;
 
+function IsDigitsOnly(const Value: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := Length(Value) > 0;
+  if not Result then
+    exit;
+
+  for I := 1 to Length(Value) do begin
+    if (Value[I] < '0') or (Value[I] > '9') then begin
+      Result := False;
+      exit;
+    end;
+  end;
+end;
+
+function IsValidIPv4Address(const Value: string): Boolean;
+var
+  Remaining: string;
+  Segment: string;
+  DotPos: Integer;
+  DotCount: Integer;
+  SegmentValue: Integer;
+begin
+  Result := False;
+  Remaining := Trim(Value);
+  if Remaining = '' then
+    exit;
+
+  DotCount := 0;
+  while True do begin
+    DotPos := Pos('.', Remaining);
+    if DotPos > 0 then begin
+      Segment := Copy(Remaining, 1, DotPos - 1);
+      Remaining := Copy(Remaining, DotPos + 1, Length(Remaining) - DotPos);
+      DotCount := DotCount + 1;
+    end
+    else begin
+      Segment := Remaining;
+      Remaining := '';
+    end;
+
+    if (Segment = '') or (Length(Segment) > 3) then
+      exit;
+    if not IsDigitsOnly(Segment) then
+      exit;
+
+    SegmentValue := StrToInt(Segment);
+    if (SegmentValue < 0) or (SegmentValue > 255) then
+      exit;
+
+    if (Length(Segment) > 1) and (Segment[1] = '0') then
+      exit;
+
+    if DotPos = 0 then
+      break;
+  end;
+
+  if DotCount <> 3 then
+    exit;
+
+  Result := True;
+end;
+
 function IsNvidiaGpuPresent: Boolean;
 var
   SubKeys: TArrayOfString;
@@ -194,6 +545,19 @@ begin
   end;
 end;
 
+function TestRemoteHostReachability(TargetHost: string): Boolean;
+var
+  ResultCode: Integer;
+  Command: string;
+begin
+  Result := False;
+
+  Command := '-NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference=''Stop''; try { $client = New-Object System.Net.Sockets.TcpClient; $async = $client.BeginConnect("' + TargetHost + '", 7000, $null, $null); if (-not $async.AsyncWaitHandle.WaitOne(2000)) { $client.Close(); exit 1 }; $client.EndConnect($async); $client.Dispose(); exit 0 } catch { exit 1 }"';
+
+  if Exec(ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'), Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 0);
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   IsNvidiaDetected: Boolean;
@@ -211,12 +575,20 @@ begin
     if Trim(IPPage.Values[0]) = '' then begin
       MsgBox('Enter the IPv4 address of the workstation that is hosting Odysseus.', mbError, MB_OK);
       Result := False;
+    end
+    else if not IsValidIPv4Address(IPPage.Values[0]) then begin
+      MsgBox('Enter a valid IPv4 address (for example: 192.168.1.45).', mbError, MB_OK);
+      Result := False;
+    end
+    else if not TestRemoteHostReachability(IPPage.Values[0]) then begin
+      MsgBox('The specified host could not be reached on port 7000. Confirm Odysseus is running and the address is correct before continuing.', mbError, MB_OK);
+      Result := False;
     end;
   end;
 
   if (CurPageID = RepoRefPage.ID) and IsLocalInstallation then begin
-    if Trim(RepoRefPage.Values[0]) = '' then begin
-      MsgBox('Enter a branch or tag name (for example: main).', mbError, MB_OK);
+    if RepoRefCombo.ItemIndex < 0 then begin
+      MsgBox('Select a remote branch to continue.', mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -225,34 +597,33 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   WslCheckCode: Integer;
-  HostModeFile: string;
-  RepoRefFile: string;
-  RebuildModeFile: string;
+  LauncherConfig: string;
   SelectedRepoRef: string;
   SelectedRebuildMode: string;
 begin
   if (CurStep = ssPostInstall) and (IsLocalInstallation) then begin
-    SelectedRepoRef := Trim(RepoRefPage.Values[0]);
-    if SelectedRepoRef = '' then
-      SelectedRepoRef := 'main';
+    SelectedRepoRef := GetSelectedRepoRef;
 
     SelectedRebuildMode := GetSelectedRebuildMode;
 
-    RepoRefFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF';
-    SaveStringToFile(RepoRefFile, SelectedRepoRef, False);
+    { Single launcher config replaces the former per-key marker files. }
+    LauncherConfig :=
+      'ODYSSEUS_REPO_REF=' + SelectedRepoRef + #13#10 +
+      'ODYSSEUS_REBUILD_MODE=' + SelectedRebuildMode + #13#10 +
+      'ODYSSEUS_REPO_SYNC_MODE=managed-clean' + #13#10;
+    if IsHostSelected then
+      LauncherConfig := LauncherConfig + 'ODYSSEUS_HOST_MODE=1' + #13#10
+    else
+      LauncherConfig := LauncherConfig + 'ODYSSEUS_HOST_MODE=0' + #13#10;
 
-    RebuildModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE';
-    SaveStringToFile(RebuildModeFile, SelectedRebuildMode, False);
+    SaveStringToFile(ExpandConstant('{app}') + '\odysseus-launcher.config', LauncherConfig, False);
 
-    if IsHostSelected then begin
-      HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
-      SaveStringToFile(HostModeFile, 'true', False);
-    end
-    else begin
-      HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
-      if FileExists(HostModeFile) then
-        DeleteFile(HostModeFile);
-    end;
+    { Remove legacy marker files from earlier installer versions. }
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REPO_SYNC_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_TEST_MODE');
 
     { Readiness check only: exit 10 = WSL absent, exit 11 = Ubuntu absent, exit 0 = both present }
     if not Exec(
@@ -470,6 +841,8 @@ begin
   if CurUninstallStep = usPostUninstall then begin
     RunPowerShellHidden(
       'netsh.exe advfirewall firewall delete rule name=''Odysseus AI Network Host'' 1>$null 2>$null');
+    RunPowerShellHidden(
+      'netsh.exe advfirewall firewall delete rule name=''Odysseus Ollama WSL Bridge'' 1>$null 2>$null');
 
     if not RemoveResidualInstallFiles then
       exit;

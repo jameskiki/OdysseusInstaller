@@ -7,7 +7,7 @@
     Checks key runtime layers and reports PASS/WARN/FAIL status:
     - Ollama process, listener, and localhost endpoint
     - WSL availability and host routing
-    - .env model endpoint keys in ~/odysseus/.env
+    - Runtime model endpoint keys in ~/.odysseus/runtime.env (fallback: ~/odysseus/.env)
     - Docker daemon and compose container status
     - Odysseus HTTP endpoint on port 7000
 
@@ -24,9 +24,19 @@ param (
 $ErrorActionPreference = 'SilentlyContinue'
 $WslDistro = $null
 
-$script:results = [System.Collections.Generic.List[PSCustomObject]]::new()
-$script:failCount = 0
-$script:warnCount = 0
+$ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$RuntimeChecksModulePath = Join-Path $ScriptRoot 'lib\Odysseus.RuntimeChecks.psm1'
+if (-not (Test-Path $RuntimeChecksModulePath)) {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required audit files."
+}
+try {
+    Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
+}
+catch {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required audit files."
+}
+
+$script:CheckContext = New-OdysseusCheckContext
 
 function Write-Check {
     param(
@@ -36,15 +46,7 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
-
-    $script:results.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    if ($Status -eq 'FAIL') { $script:failCount++ }
-    elseif ($Status -eq 'WARN') { $script:warnCount++ }
+    Write-OdysseusCheck -Context $script:CheckContext -Name $Name -Status $Status -Detail $Detail
 }
 
 function Write-Section {
@@ -56,22 +58,9 @@ function Write-Section {
 
 function Invoke-Wsl {
     param([string]$Command)
-    & wsl.exe -d $WslDistro -- bash -c $Command 2>$null
-}
 
-function Get-InstalledWslDistros {
-    $distros = (& wsl.exe -l -q 2>$null)
-    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-}
-
-function Resolve-UbuntuDistro {
-    param([string[]]$Distros)
-
-    if ($Distros -contains 'Ubuntu') {
-        return 'Ubuntu'
-    }
-
-    return ($Distros | Where-Object { $_ -match '^Ubuntu(-.*)?$' } | Select-Object -First 1)
+    $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $Command
+    return @($result.Output)
 }
 
 function Test-HttpOk {
@@ -80,13 +69,7 @@ function Test-HttpOk {
         [int]$TimeoutSec = 5
     )
 
-    try {
-        $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400)
-    }
-    catch {
-        return $false
-    }
+    return (Test-OdysseusHttpEndpoint -Uri $Uri -TimeoutSec $TimeoutSec)
 }
 
 Clear-Host
@@ -124,6 +107,25 @@ else {
     Write-Check -Name "Ollama bind scope" -Status WARN -Detail "No listener detected on port 11434."
 }
 
+$bridgeRule = Get-OdysseusFirewallRuleStatus -DisplayName 'Odysseus Ollama WSL Bridge'
+switch ($bridgeRule.Status) {
+    'Enabled' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status PASS
+    }
+    'Disabled' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule exists but is disabled."
+    }
+    'AccessDenied' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail $bridgeRule.Detail
+    }
+    'NotFound' {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Rule not found. WSL -> Windows host traffic on 11434 may be blocked."
+    }
+    default {
+        Write-Check -Name "Ollama WSL firewall bridge rule" -Status WARN -Detail "Firewall rule state could not be verified: $($bridgeRule.Detail)"
+    }
+}
+
 Write-Section "2) WSL routing and host reachability"
 
 $hasWsl = $null -ne (Get-Command wsl.exe -ErrorAction SilentlyContinue)
@@ -133,8 +135,8 @@ if (-not $hasWsl) {
 else {
     Write-Check -Name "WSL available" -Status PASS
 
-    $distros = Get-InstalledWslDistros
-    $WslDistro = Resolve-UbuntuDistro -Distros $distros
+    $distros = @(Get-OdysseusInstalledWslDistros)
+    $WslDistro = Resolve-OdysseusUbuntuDistro -Distros $distros
     if (-not [string]::IsNullOrWhiteSpace($WslDistro)) {
         Write-Check -Name "Ubuntu distro present" -Status PASS -Detail ("Using distro '{0}'" -f $WslDistro)
 
@@ -150,34 +152,12 @@ else {
         else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-            $candidates = [System.Collections.Generic.List[string]]::new()
-            if (-not [string]::IsNullOrWhiteSpace($gatewayIp)) {
-                $candidates.Add($gatewayIp)
-            }
-            $candidates.Add('host.docker.internal')
-
-            $reachableVia = $null
-            $attempted = [System.Collections.Generic.List[string]]::new()
-            $seen = @{}
-            foreach ($candidate in $candidates) {
-                if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-                if ($seen.ContainsKey($candidate)) { continue }
-                $seen[$candidate] = $true
-                $attempted.Add($candidate)
-
-                $reach = Invoke-Wsl "if curl -sf --max-time 5 http://${candidate}:11434/api/tags >/dev/null 2>&1; then echo OK; else echo FAIL; fi"
-                if (($reach -join '').Trim() -eq 'OK') {
-                    $reachableVia = $candidate
-                    break
-                }
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
-                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reachableVia)
+            $reach = Test-OdysseusWslOllamaReachability -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -TimeoutSec 5
+            if ($reach.Success) {
+                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reach.ReachableVia)
             }
             else {
-                $attemptedText = if ($attempted.Count -gt 0) { $attempted -join ', ' } else { 'none' }
-                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}." -f $attemptedText)
+                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL. Attempts: {0}" -f $reach.AttemptSummary)
             }
         }
     }
@@ -189,21 +169,21 @@ else {
 Write-Section "3) Environment and containers"
 
 if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
-    $envLines = Invoke-Wsl 'cat ~/odysseus/.env 2>/dev/null'
+    $envLines = Invoke-Wsl 'if [ -f ~/.odysseus/runtime.env ]; then cat ~/.odysseus/runtime.env; else cat ~/odysseus/.env 2>/dev/null; fi'
     if ($null -eq $envLines -or ($envLines -join '').Trim().Length -eq 0) {
-        Write-Check -Name ".env present" -Status WARN -Detail "~/odysseus/.env not found or empty."
+        Write-Check -Name "Runtime env present" -Status WARN -Detail "Neither ~/.odysseus/runtime.env nor ~/odysseus/.env was found with content."
     }
     else {
-        Write-Check -Name ".env present" -Status PASS
+        Write-Check -Name "Runtime env present" -Status PASS
 
         $requiredKeys = @('LLM_HOST', 'LLM_HOSTS', 'OLLAMA_BASE_URL', 'EMBEDDING_URL')
         foreach ($key in $requiredKeys) {
             $line = $envLines | Where-Object { $_ -match ("^{0}=" -f [regex]::Escape($key)) } | Select-Object -Last 1
             if ($line) {
-                Write-Check -Name (".env key {0}" -f $key) -Status PASS
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status PASS
             }
             else {
-                Write-Check -Name (".env key {0}" -f $key) -Status WARN -Detail "Key is missing."
+                Write-Check -Name ("Runtime key {0}" -f $key) -Status WARN -Detail "Key is missing."
             }
         }
     }
@@ -214,33 +194,27 @@ if ($hasWsl -and -not [string]::IsNullOrWhiteSpace($WslDistro)) {
     if ($dockerRunning -eq 'RUNNING') {
         Write-Check -Name "Docker daemon (WSL)" -Status PASS
 
-        $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; docker compose ps -a 2>/dev/null'
-        if (-not $composePs -or ($composePs -join '').Trim().Length -eq 0) {
-            # Fallback for environments where docker requires sudo. Use -n to avoid
-            # interactive password prompts during health checks.
-            $composePs = Invoke-Wsl 'cd ~/odysseus 2>/dev/null; sudo -n docker compose ps -a 2>/dev/null'
-        }
-
-        $rows = @($composePs | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
-        if ($rows.Count -gt 0) {
-            foreach ($row in $rows) {
-                $container = ($row.Trim() -split '\s+')[0]
-                if ($row -match '\bExit') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status FAIL -Detail "Exited"
-                }
-                elseif ($row -match '\(unhealthy\)') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail "Up (unhealthy)"
-                }
-                elseif ($row -match '\bUp\b') {
-                    Write-Check -Name ("Container {0}" -f $container) -Status PASS -Detail "Up"
-                }
-                else {
-                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail "Unknown status"
-                }
-            }
+        $states = Get-OdysseusComposeServiceStates -WslDistro $WslDistro
+        if ($states.Count -eq 0) {
+            Write-Check -Name "Odysseus containers" -Status WARN -Detail "Container list unavailable (docker permissions or no compose services under ~/odysseus)."
         }
         else {
-            Write-Check -Name "Odysseus containers" -Status WARN -Detail "Container list unavailable (docker permissions or no compose services under ~/odysseus)."
+            foreach ($container in ($states.Keys | Sort-Object)) {
+                $state = $states[$container].State
+                $health = $states[$container].Health
+
+                if ($state -ne 'running') {
+                    Write-Check -Name ("Container {0}" -f $container) -Status FAIL -Detail ("State: {0}" -f $state)
+                    continue
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($health) -and $health -ne 'healthy') {
+                    Write-Check -Name ("Container {0}" -f $container) -Status WARN -Detail ("Running but health is '{0}'" -f $health)
+                    continue
+                }
+
+                Write-Check -Name ("Container {0}" -f $container) -Status PASS -Detail "Up"
+            }
         }
     }
     else {
@@ -276,26 +250,32 @@ if ($CheckLanReachability) {
         Write-Check -Name "Port 7000 LAN bind" -Status WARN -Detail "No listener on port 7000."
     }
 
-    $fw = Get-NetFirewallRule -DisplayName 'Odysseus AI Network Host' -ErrorAction SilentlyContinue
-    if ($fw -and $fw.Enabled -eq 'True') {
-        Write-Check -Name "Firewall rule for port 7000" -Status PASS
-    }
-    elseif ($fw) {
-        Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule exists but is disabled."
-    }
-    else {
-        Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule not found."
+    $fw = Get-OdysseusFirewallRuleStatus -DisplayName 'Odysseus AI Network Host'
+    switch ($fw.Status) {
+        'Enabled' {
+            Write-Check -Name "Firewall rule for port 7000" -Status PASS
+        }
+        'Disabled' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule exists but is disabled."
+        }
+        'AccessDenied' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail $fw.Detail
+        }
+        'NotFound' {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Rule not found."
+        }
+        default {
+            Write-Check -Name "Firewall rule for port 7000" -Status WARN -Detail "Firewall rule state could not be verified: $($fw.Detail)"
+        }
     }
 }
 
 Write-Host ""
-$verdict = if ($script:failCount -gt 0) { 'DOWN' } elseif ($script:warnCount -gt 0) { 'DEGRADED' } else { 'READY' }
+$verdict = if ($script:CheckContext.FailCount -gt 0) { 'DOWN' } elseif ($script:CheckContext.WarnCount -gt 0) { 'DEGRADED' } else { 'READY' }
 $verdictColor = @{ READY = 'Green'; DEGRADED = 'Yellow'; DOWN = 'Red' }[$verdict]
-$passCount = ($script:results | Where-Object { $_.Status -eq 'PASS' }).Count
-$totalCount = $script:results.Count
 
 Write-Host ("Verdict: {0}" -f $verdict) -ForegroundColor $verdictColor
-Write-Host ("Checks: {0}/{1} passed, {2} warning(s), {3} failure(s)" -f $passCount, $totalCount, $script:warnCount, $script:failCount)
+Write-Host ("Checks: {0}/{1} passed, {2} warning(s), {3} failure(s)" -f $script:CheckContext.PassCount, $script:CheckContext.Results.Count, $script:CheckContext.WarnCount, $script:CheckContext.FailCount)
 
-if ($script:failCount -gt 0) { exit 1 }
+if ($script:CheckContext.FailCount -gt 0) { exit 1 }
 exit 0

@@ -1,5 +1,21 @@
+param(
+    [switch]$TestMode
+)
+
 Clear-Host
 $ErrorActionPreference = 'Stop'
+
+$ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
+$RuntimeChecksModulePath = Join-Path $ScriptRoot 'lib\Odysseus.RuntimeChecks.psm1'
+if (-not (Test-Path $RuntimeChecksModulePath)) {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required launcher files."
+}
+try {
+    Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
+}
+catch {
+    throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required launcher files."
+}
 
 # Capture a transcript of this launch to a per-user log for post-mortem debugging.
 $LogDir = Join-Path $env:LOCALAPPDATA 'Odysseus\Logs'
@@ -14,42 +30,70 @@ catch {
 }
 
 $WslDistro = $null
-$BootstrapScript = Join-Path $PSScriptRoot 'run_odysseus.sh'
+$BootstrapScript = Join-Path $ScriptRoot 'run_odysseus.sh'
 if (-not (Test-Path $BootstrapScript)) {
-    $BootstrapScript = Join-Path $PSScriptRoot '..\wsl\run_odysseus.sh'
+    $BootstrapScript = Join-Path $ScriptRoot '..\wsl\run_odysseus.sh'
 }
-$HostModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_HOST_MODE'
-$RepoRefFile = Join-Path $PSScriptRoot 'ODYSSEUS_REPO_REF'
-$RebuildModeFile = Join-Path $PSScriptRoot 'ODYSSEUS_REBUILD_MODE'
-$IsHostMode = Test-Path $HostModeFile
-$env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
-$repoRef = 'main'
-if (Test-Path $RepoRefFile) {
-    $rawRepoRef = (Get-Content -Path $RepoRefFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($rawRepoRef)) {
-        $repoRef = $rawRepoRef
+
+# Single key=value config written by the installer (replaces the former per-key marker files).
+$LauncherConfigFile = Join-Path $ScriptRoot 'odysseus-launcher.config'
+$LauncherConfig = @{}
+if (Test-Path $LauncherConfigFile) {
+    foreach ($line in (Get-Content -Path $LauncherConfigFile -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*([A-Z_]+)\s*=\s*(.*)$') {
+            $LauncherConfig[$matches[1]] = $matches[2].Trim()
+        }
     }
 }
 
+$IsHostMode = ($LauncherConfig['ODYSSEUS_HOST_MODE'] -match '^(1|true|yes)$')
+$IsTestMode = $TestMode -or ($LauncherConfig['ODYSSEUS_TEST_MODE'] -match '^(1|true|yes)$') -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
+$env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
+$env:ODYSSEUS_TEST_MODE = if ($IsTestMode) { '1' } else { '0' }
+$repoRef = 'dev'
+if (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_REPO_REF'])) {
+    $repoRef = $LauncherConfig['ODYSSEUS_REPO_REF']
+}
+
 $rebuildMode = 'ask'
-if (Test-Path $RebuildModeFile) {
-    $rawRebuildMode = (Get-Content -Path $RebuildModeFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim().ToLowerInvariant()
+$rawRebuildMode = ($LauncherConfig['ODYSSEUS_REBUILD_MODE'] -as [string])
+if ($rawRebuildMode) {
+    $rawRebuildMode = $rawRebuildMode.ToLowerInvariant()
     if ($rawRebuildMode -in @('ask', 'always', 'never')) {
         $rebuildMode = $rawRebuildMode
     }
 }
 
+if ($IsTestMode) {
+    $rebuildMode = 'never'
+}
+
+$repoSyncMode = 'managed-ff'
+$rawRepoSyncMode = ($LauncherConfig['ODYSSEUS_REPO_SYNC_MODE'] -as [string])
+if ($rawRepoSyncMode) {
+    $rawRepoSyncMode = $rawRepoSyncMode.ToLowerInvariant()
+    if ($rawRepoSyncMode -in @('managed-clean', 'managed-ff', 'unmanaged')) {
+        $repoSyncMode = $rawRepoSyncMode
+    }
+}
+
 $env:ODYSSEUS_REPO_REF = $repoRef
+$env:ODYSSEUS_REPO_SYNC_MODE = $repoSyncMode
 switch ($rebuildMode) {
     'always' { $env:ODYSSEUS_REBUILD = '1' }
     'never' { $env:ODYSSEUS_REBUILD = '0' }
     default {
-        $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
-        $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        if ($IsTestMode) {
+            $env:ODYSSEUS_REBUILD = '0'
+        }
+        else {
+            $choice = Read-Host "Rebuild Odysseus containers for this launch? [Y/N]"
+            $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
+        }
     }
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE')
+$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -68,18 +112,11 @@ $WatchdogIntervalSec = 10
 $RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
 
 function Get-InstalledWslDistros {
-    $distros = & wsl.exe -l -q 2>$null
-    return @($distros | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return @(Get-OdysseusInstalledWslDistros)
 }
 
 function Resolve-UbuntuDistro {
-    $distros = Get-InstalledWslDistros
-
-    if ($distros -contains 'Ubuntu') {
-        return 'Ubuntu'
-    }
-
-    $ubuntuVariant = $distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1
+    $ubuntuVariant = Resolve-OdysseusUbuntuDistro -Distros (Get-InstalledWslDistros)
     if (-not $ubuntuVariant) {
         throw "No Ubuntu WSL distribution was found. Run the 'Prepare WSL for Odysseus' shortcut first. It installs Ubuntu with 'wsl --install -d Ubuntu' and guides first-run setup. Then rerun Odysseus."
     }
@@ -87,9 +124,8 @@ function Resolve-UbuntuDistro {
     return $ubuntuVariant
 }
 
-function Ensure-UbuntuInitialized {
-    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
-    if ($LASTEXITCODE -eq 0) {
+function Confirm-UbuntuInitialized {
+    if (Test-OdysseusUbuntuInitialized -WslDistro $WslDistro) {
         return
     }
 
@@ -97,17 +133,16 @@ function Ensure-UbuntuInitialized {
     Write-Host "A Linux terminal will open now. Complete the username/password prompts, then close it." -ForegroundColor Yellow
     & wsl.exe -d $WslDistro
 
-    & wsl.exe -d $WslDistro -- bash -lc 'id -un >/dev/null 2>&1'
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-OdysseusUbuntuInitialized -WslDistro $WslDistro)) {
         throw "Ubuntu initialization is incomplete. Run the 'Prepare WSL for Odysseus' shortcut, complete Linux username/password creation when prompted, then rerun Odysseus."
     }
 }
 
-function Ensure-WslSystemdEnabled {
+function Enable-WslSystemd {
     # Check first: is systemd=true already set under [boot] in /etc/wsl.conf?
     # We use a small, single-line bash invocation so nothing depends on stdin,
     # here-strings, base64, CRLF handling, or PowerShell native-exe arg quoting.
-    & wsl.exe -d $WslDistro -u root -- bash -c "grep -qiE '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true[[:space:]]*$' /etc/wsl.conf 2>/dev/null"
+    & wsl.exe -d $WslDistro -u root --exec bash -c "grep -qiE '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true[[:space:]]*$' /etc/wsl.conf 2>/dev/null"
     if ($LASTEXITCODE -eq 0) {
         return
     }
@@ -135,7 +170,8 @@ END {
     $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
     $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
 
-    & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
+    # --exec avoids WSL's intermediate shell; PS 5.1 needs embedded quotes escaped for native args.
+    & wsl.exe -d $WslDistro -u root --exec bash -c ($bashCmd -replace '"', '\"')
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
     }
@@ -189,6 +225,24 @@ function Get-LastNonEmptyLine {
     return $null
 }
 
+function Get-FileTailText {
+    param(
+        [string]$Path,
+        [int]$Tail = 40
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return $null
+    }
+
+    $lines = Get-Content -Path $Path -Tail $Tail -ErrorAction SilentlyContinue
+    if ($null -eq $lines -or $lines.Count -eq 0) {
+        return $null
+    }
+
+    return (($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n")
+}
+
 function Invoke-ProcessWithProgress {
     param (
         [string]$FilePath,
@@ -229,7 +283,7 @@ function Invoke-ProcessWithProgress {
     return $proc
 }
 
-function Ensure-OllamaAvailable {
+function Install-OllamaIfMissing {
     $ollama = Get-OllamaCommand
     if ($null -ne $ollama) {
         return $true
@@ -263,12 +317,17 @@ function Ensure-OllamaAvailable {
         -StdErrPath $wingetErrLog
 
     # winget returns Win32/HRESULT-style codes that may surface as signed or unsigned.
-    # Normalize to UInt32 first to avoid false negatives on successful installs.
+    # Normalize via two's-complement bytes so negative Int32 values map to the same
+    # UInt32 bit pattern (for example, -1978335189 == 0x8A15002B).
     # 0x00000000 = installed
     # 0x8A15002B = no applicable upgrade / already installed
     # 0x8A150109 = install succeeded, reboot recommended
-    $exitCode = [uint32]$proc.ExitCode
-    $successCodes = @([uint32]0x00000000, [uint32]0x8A15002B, [uint32]0x8A150109)
+    $exitCode = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$proc.ExitCode), 0)
+    $successCodes = @(
+        [uint32]0,
+        [System.UInt32]::Parse('8A15002B', [System.Globalization.NumberStyles]::HexNumber),
+        [System.UInt32]::Parse('8A150109', [System.Globalization.NumberStyles]::HexNumber)
+    )
     if ($successCodes -notcontains $exitCode) {
         $tail = ''
         if (Test-Path $wingetLog) {
@@ -287,7 +346,7 @@ function Ensure-OllamaAvailable {
     return $true
 }
 
-function Ensure-OllamaEndpoint {
+function Initialize-OllamaEndpoint {
     [Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0:11434', 'User')
     $env:OLLAMA_HOST = '0.0.0.0:11434'
 
@@ -299,7 +358,7 @@ function Ensure-OllamaEndpoint {
     $allInterfaces = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
     $loopbackOnly = Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') }
+        Where-Object { $_.LocalAddress -eq '127.0.0.1' }
 
     if ($allInterfaces) {
         Write-Host "[INFO] Ollama is already listening on all interfaces for this session." -ForegroundColor DarkGray
@@ -317,8 +376,7 @@ function Ensure-OllamaEndpoint {
     for ($i = 0; $i -lt 20; $i++) {
         Write-Progress -Activity 'Starting Ollama service' -Status 'Waiting for http://localhost:11434 to respond.' -PercentComplete (($i / 20) * 100)
         Start-Sleep -Milliseconds 500
-        $probe = Invoke-WebRequest -Uri 'http://localhost:11434/api/tags' -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        if ($probe -and $probe.StatusCode -eq 200) {
+        if (Test-HttpEndpoint -Uri 'http://localhost:11434/api/tags' -TimeoutSec 2) {
             Write-Host "[INFO] Ollama localhost audit passed: http://localhost:11434/api/tags is reachable." -ForegroundColor DarkGray
             Write-Progress -Activity 'Starting Ollama service' -Completed
             return
@@ -330,50 +388,33 @@ function Ensure-OllamaEndpoint {
     throw "Ollama did not become reachable on http://localhost:11434/api/tags. Start it manually with: `"$($ollama.Source)`" serve, then verify it is bound to 0.0.0.0:11434 rather than only 127.0.0.1:11434."
 }
 
-function Resolve-WindowsOllamaHostOverride {
-    $candidates = [System.Collections.Generic.List[string]]::new()
+function Confirm-OllamaFirewallBridge {
+    $ruleName = 'Odysseus Ollama WSL Bridge'
 
-    if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
-        $candidates.Add($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE.Trim())
-    }
-
-    $resolv = Invoke-WslCommand -Command "awk '/^nameserver[[:space:]]+/ {print `$2; exit}' /etc/resolv.conf"
-    if ($resolv.ExitCode -eq 0) {
-        $nameServer = ($resolv.Output | Select-Object -First 1).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($nameServer)) {
-            $candidates.Add($nameServer)
+    $status = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
+    switch ($status.Status) {
+        'Enabled' {
+            Write-Host "[INFO] Firewall rule '$ruleName' is configured and enabled." -ForegroundColor DarkGray
+        }
+        'Disabled' {
+            Write-Host "[WARN] Firewall rule '$ruleName' exists but is disabled. The installer should enable this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
+        }
+        'AccessDenied' {
+            Write-Host "[WARN] $($status.Detail)" -ForegroundColor Yellow
+        }
+        'NotFound' {
+            Write-Host "[WARN] Firewall rule '$ruleName' is not configured. The installer should configure this rule for TCP 11434. If WSL cannot reach Ollama, rerun the installer." -ForegroundColor Yellow
+        }
+        default {
+            Write-Host "[WARN] Could not verify firewall rule '$ruleName'. $($status.Detail)" -ForegroundColor Yellow
         }
     }
-
-    $gateway = Get-WslGatewayIp
-    if (-not [string]::IsNullOrWhiteSpace($gateway)) {
-        $candidates.Add($gateway)
-    }
-
-    $candidates.Add('host.docker.internal')
-
-    $seen = @{}
-    foreach ($candidate in $candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        if ($seen.ContainsKey($candidate)) { continue }
-        $seen[$candidate] = $true
-
-        if (Test-HttpEndpoint -Uri "http://$candidate`:11434/api/tags" -TimeoutSec 2) {
-            return $candidate
-        }
-    }
-
-    return $null
 }
 
 function Invoke-WslCommand {
     param([string]$Command)
 
-    $output = & wsl.exe -d $WslDistro -- bash -lc $Command 2>$null
-    return [PSCustomObject]@{
-        ExitCode = $LASTEXITCODE
-        Output = @($output)
-    }
+    return Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $Command -LoginShell
 }
 
 function Test-HttpEndpoint {
@@ -382,65 +423,35 @@ function Test-HttpEndpoint {
         [int]$TimeoutSec = 3
     )
 
-    try {
-        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
-    }
-    catch {
-        return $false
-    }
+    return (Test-OdysseusHttpEndpoint -Uri $Uri -TimeoutSec $TimeoutSec)
 }
 
 function Get-WslGatewayIp {
-    $route = Invoke-WslCommand -Command "ip route show default 2>/dev/null | head -n 1"
-    if ($route.ExitCode -ne 0) {
-        return $null
-    }
+    return (Get-OdysseusWslGatewayIp -WslDistro $WslDistro)
+}
 
-    $routeLine = ($route.Output | Select-Object -First 1).Trim()
-    if ($routeLine -match 'default\s+via\s+(\S+)') {
-        return $matches[1]
-    }
+function Get-WslOllamaCandidates {
+    return @(Get-OdysseusOllamaCandidates -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
+}
 
-    return $null
+function Invoke-WslComposeCommand {
+    param(
+        [string]$ComposeArgs,
+        [switch]$UseSudo
+    )
+
+        return Invoke-OdysseusWslCompose -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo
 }
 
 function Get-ComposeServiceStates {
-    $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
-    if ($result.ExitCode -ne 0) {
-        # Fallback for environments that still require sudo, but keep it non-interactive.
-        $result = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null"
-    }
-    if ($result.ExitCode -ne 0) {
-        return @{}
-    }
-
-    $states = @{}
-    foreach ($line in $result.Output) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-        $parts = $line -split '\|', 3
-        if ($parts.Count -lt 2) { continue }
-
-        $service = $parts[0].Trim()
-        $state = $parts[1].Trim().ToLowerInvariant()
-        $health = if ($parts.Count -ge 3) { $parts[2].Trim().ToLowerInvariant() } else { '' }
-
-        if (-not [string]::IsNullOrWhiteSpace($service)) {
-            $states[$service] = [PSCustomObject]@{
-                State = $state
-                Health = $health
-            }
-        }
-    }
-
-    return $states
+    return Get-OdysseusComposeServiceStates -WslDistro $WslDistro
 }
 
 function Test-OdysseusRuntimeHealth {
     param([string[]]$RequiredServices)
 
     $issues = [System.Collections.Generic.List[string]]::new()
+    $observations = [System.Collections.Generic.List[string]]::new()
 
     $wslCheck = Invoke-WslCommand -Command "id -un >/dev/null 2>&1"
     if ($wslCheck.ExitCode -ne 0) {
@@ -451,14 +462,17 @@ function Test-OdysseusRuntimeHealth {
         $issues.Add('Windows Ollama endpoint is down (http://localhost:11434/api/tags).')
     }
 
-    $gatewayIp = Get-WslGatewayIp
-    if ([string]::IsNullOrWhiteSpace($gatewayIp)) {
-        $issues.Add('WSL default gateway could not be resolved.')
+    $ollamaCandidates = Get-WslOllamaCandidates
+    if ($ollamaCandidates.Count -eq 0) {
+        $issues.Add('No WSL host candidates available for Ollama reachability checks.')
     }
     else {
-        $gatewayReach = Invoke-WslCommand -Command "curl -sf --max-time 3 http://${gatewayIp}:11434/api/tags >/dev/null 2>&1"
-        if ($gatewayReach.ExitCode -ne 0) {
-            $issues.Add("WSL cannot reach Ollama via gateway ${gatewayIp}:11434.")
+        $reach = Test-OdysseusWslOllamaReachability -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -TimeoutSec 3
+        if ($reach.Success) {
+            $observations.Add("Ollama reachable from WSL via $($reach.ReachableVia).")
+        }
+        else {
+            $issues.Add("WSL cannot reach Ollama from any candidate host ($($reach.AttemptSummary)).")
         }
     }
 
@@ -496,16 +510,17 @@ function Test-OdysseusRuntimeHealth {
     return [PSCustomObject]@{
         Healthy = ($issues.Count -eq 0)
         Issues = @($issues)
+        Observations = @($observations)
         Summary = if ($issues.Count -eq 0) { 'HEALTHY' } else { ($issues -join ' ') }
     }
 }
 
 function Invoke-WatchdogAutoHealLight {
     Write-Host "[WATCHDOG][WARN] Runtime drift detected. Attempting lightweight recovery with 'docker compose up -d'." -ForegroundColor Yellow
-    $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && docker compose up -d"
+    $heal = Invoke-WslComposeCommand -ComposeArgs 'up -d'
     if ($heal.ExitCode -ne 0) {
         # Fallback without password prompt when sudo is required.
-        $heal = Invoke-WslCommand -Command "cd ~/odysseus 2>/dev/null && sudo -n docker compose up -d"
+        $heal = Invoke-WslComposeCommand -ComposeArgs 'up -d' -UseSudo
     }
     return ($heal.ExitCode -eq 0)
 }
@@ -608,14 +623,20 @@ function Invoke-Step {
             Write-Host "Full log: $LogFile" -ForegroundColor DarkGray
         }
         try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-        Read-Host 'Press Enter to close...'
+        if (-not $IsTestMode) {
+            Read-Host 'Press Enter to close...'
+        }
         exit 1
     }
 }
 
 Invoke-Step `
-    -Intent "Applying local runtime preferences (branch/ref '$repoRef', rebuild mode '$rebuildMode')..." `
+    -Intent "Applying local runtime preferences (branch/ref '$repoRef', sync mode '$repoSyncMode', rebuild mode '$rebuildMode')..." `
     -Action {
+        if ($IsTestMode) {
+            Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
+        }
+        Write-Host "[INFO] Repo sync mode: $repoSyncMode" -ForegroundColor DarkGray
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }
@@ -642,33 +663,36 @@ Invoke-Step `
 Invoke-Step `
     -Intent "Ensuring Ubuntu initialization is complete (Linux user created)..." `
     -Action {
-        Ensure-UbuntuInitialized
+        Confirm-UbuntuInitialized
     }
 
 Invoke-Step `
     -Intent "Enforcing WSL systemd support for reliable Docker daemon management..." `
     -Action {
-        Ensure-WslSystemdEnabled
+        Enable-WslSystemd
         if ($env:ODYSSEUS_WSL_RESTART_REQUIRED -eq '1') {
             Write-Host "WSL systemd was enabled and WSL was restarted." -ForegroundColor DarkGray
         }
     }
 
+if ($IsTestMode) {
+    Invoke-Step `
+        -Intent "Stopping after launcher preflight validation because test mode is enabled..." `
+        -Action {
+            Write-Host "[INFO] Skipped Ollama auto-install, Linux bootstrap, endpoint polling, browser launch, and watchdog startup." -ForegroundColor DarkGray
+        }
+
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    Write-Host 'Odysseus launcher preflight test finished.' -ForegroundColor DarkGray
+    exit 0
+}
+
 Invoke-Step `
     -Intent "Checking local Ollama runtime for model discovery compatibility..." `
     -Action {
-        Ensure-OllamaAvailable | Out-Null
-        Ensure-OllamaEndpoint
-
-        $windowsHostOverride = Resolve-WindowsOllamaHostOverride
-        if (-not [string]::IsNullOrWhiteSpace($windowsHostOverride)) {
-            $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE = $windowsHostOverride
-            Write-Host "[INFO] Using Windows host override for WSL Ollama routing: $windowsHostOverride" -ForegroundColor DarkGray
-        }
-        else {
-            Remove-Item Env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -ErrorAction SilentlyContinue
-            Write-Host "[INFO] No deterministic Windows host override resolved; WSL bootstrap will probe candidates directly." -ForegroundColor DarkGray
-        }
+        Install-OllamaIfMissing | Out-Null
+        Initialize-OllamaEndpoint
+        Confirm-OllamaFirewallBridge
     }
 
 Invoke-Step `
@@ -680,7 +704,7 @@ Invoke-Step `
 
         $resolvedBootstrapPath = (Resolve-Path -Path $BootstrapScript -ErrorAction Stop).Path
         $normalizedBootstrapPath = $resolvedBootstrapPath -replace '\\', '/'
-        $linuxSourcePath = (& wsl.exe -d $WslDistro -- wslpath -a $normalizedBootstrapPath 2>$null).Trim()
+        $linuxSourcePath = (& wsl.exe -d $WslDistro --exec wslpath -a $normalizedBootstrapPath 2>$null).Trim()
 
         if ([string]::IsNullOrWhiteSpace($linuxSourcePath)) {
             # Fallback conversion in case wslpath cannot translate this Windows path format.
@@ -695,7 +719,7 @@ Invoke-Step `
             throw "Unable to translate the installed bootstrap script path into WSL. Run 'wsl -d $WslDistro' once and retry."
         }
 
-        & wsl.exe -d $WslDistro -- bash -lc "tr -d '\r' < '$linuxSourcePath' > ~/run_odysseus.sh && chmod +x ~/run_odysseus.sh"
+        & wsl.exe -d $WslDistro --exec bash -lc "tr -d '\r' < '$linuxSourcePath' > ~/run_odysseus.sh && chmod +x ~/run_odysseus.sh"
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to copy run_odysseus.sh into the Ubuntu home directory."
         }
@@ -704,10 +728,26 @@ Invoke-Step `
 Invoke-Step `
     -Intent "Crossing OS boundary to trigger the Linux Environment Automator..." `
     -Action {
-        & wsl.exe -d $WslDistro -- bash -lc '~/run_odysseus.sh'
-        if ($LASTEXITCODE -ne 0) {
-            throw "The Linux bootstrap script exited with code $LASTEXITCODE."
+        Write-Host "[INFO] During bootstrap, Ubuntu may prompt for your Linux password in this window before package/container setup can continue." -ForegroundColor Yellow
+        Write-Host "[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus bootstrap:" -ForegroundColor Yellow
+        Write-Host "[INFO] A WSL-side bootstrap log is also written to ~/.odysseus/logs/latest-bootstrap.log" -ForegroundColor DarkGray
+
+        & wsl.exe -d $WslDistro --exec bash -lc '~/run_odysseus.sh'
+        $bootstrapExitCode = [int]$LASTEXITCODE
+
+        if ($bootstrapExitCode -ne 0) {
+            $bootstrapLogPath = ((& wsl.exe -d $WslDistro --exec bash -lc 'echo ~/.odysseus/logs/latest-bootstrap.log') | Select-Object -First 1).Trim()
+            $bootstrapTail = (& wsl.exe -d $WslDistro --exec bash -lc 'if [ -f ~/.odysseus/logs/latest-bootstrap.log ]; then tail -n 80 ~/.odysseus/logs/latest-bootstrap.log; fi')
+
+            $details = @("Bootstrap log: $bootstrapLogPath")
+            if ($bootstrapTail -and $bootstrapTail.Count -gt 0) {
+                $details += "bootstrap output tail:`n$($bootstrapTail -join "`n")"
+            }
+
+            throw "The Linux bootstrap script failed with exit code $bootstrapExitCode.`n$($details -join "`n`n")"
         }
+
+        Write-Host "[INFO] WSL bootstrap finished successfully." -ForegroundColor DarkGray
     }
 
 Invoke-Step `

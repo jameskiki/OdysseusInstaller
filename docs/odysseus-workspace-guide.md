@@ -13,7 +13,7 @@ You can chat with AI models, attach files, search through documents, and switch 
 ```mermaid
 graph LR
     A[🌐 Your Browser] -->|http://localhost:7000| B[🐳 Odysseus\nDocker Containers]
-    B -->|host.docker.internal:11434| C[🤖 Ollama\nWindows Host]
+    B -->|auto-resolved Windows host endpoint:11434| C[🤖 Ollama\nWindows Host]
     C --> D[🧠 AI Models\nStored Locally]
 ```
 
@@ -106,6 +106,8 @@ Your conversations are saved automatically. You can:
 | **Setup** | Automatic if an NVIDIA GPU is detected | Automatic fallback if no NVIDIA GPU is found |
 
 The installer detects your GPU automatically. If no NVIDIA GPU is found, you will see a warning during installation — you can still proceed and use Odysseus in CPU mode.
+
+AMD note: the current installer does not auto-detect AMD GPU acceleration paths. On AMD hardware, expect CPU fallback behavior unless you manually configure a supported acceleration stack.
 
 ---
 

@@ -1,7 +1,12 @@
 # Future Work
 
-- Validate remote-host IP input in installer (`installer.iss`).
-- Handle non-clean local git states more clearly in `run_odysseus.sh`.
-- Limit first-boot log capture volume for password hints in `run_odysseus.sh`.
-- Verify the systemd-enablement path in `Ensure-WslSystemdEnabled` end-to-end after the stdin-piping fix in `Launch-Odysseus.ps1`.
-- Verify `ODYSSEUS_HOST_MODE` is correctly forwarded into WSL via `WSLENV` when host mode is selected (only relevant for host-mode installs).
+## Installer UX
+
+- WSL onboarding: decide whether Ubuntu first-run login can be automated; if not, document the security and UX constraint explicitly.
+
+## Launcher And Runtime Reliability
+
+- Verify the `Enable-WslSystemd` path end-to-end on a machine where `/etc/wsl.conf` lacks `systemd=true`, and capture failure logs when the edit fails.
+- Assess safe non-loopback Ollama binding guidance or remediation for WSL reachability.
+- Add troubleshooting guidance or automatic remediation when WSL cannot reach Ollama from candidate Windows host endpoints.
+- Investigate the remaining port `127.0.0.1:7000` bind conflict during compose startup and identify the owning process or namespace before adding a preflight or fallback.
