@@ -11,10 +11,10 @@ Use this checklist before creating or publishing a release tag.
   - Container rebuild preference
   - Host IP input
 - Verify `ShouldSkipPage` behavior is documented correctly.
-- Verify output sentinel files are documented:
-  - `ODYSSEUS_HOST_MODE`
-  - `ODYSSEUS_REPO_REF`
-  - `ODYSSEUS_REBUILD_MODE`
+- Verify launcher config output is documented:
+  - single `odysseus-launcher.config` file with `ODYSSEUS_HOST_MODE`, `ODYSSEUS_REPO_REF`, `ODYSSEUS_REPO_SYNC_MODE`, `ODYSSEUS_REBUILD_MODE`
+  - legacy marker file cleanup during install
+- Verify hardcoded repo URL (`pewdiepie-archdaemon/odysseus`) is consistent between `installer.iss` and `run_odysseus.sh`.
 
 ## Launcher parity (`scripts/windows/Launch-Odysseus.ps1`)
 
@@ -23,7 +23,7 @@ Use this checklist before creating or publishing a release tag.
   - dynamic Ubuntu distro resolution (`Ubuntu`, `Ubuntu-XX.XX`)
   - Ubuntu first-run initialization path
   - WSL systemd enforcement and restart behavior
-  - TestMode activation paths (`-TestMode`, marker file, env variable)
+  - TestMode activation paths (`-TestMode`, config key, env variable)
   - TestMode behavior (non-interactive, rebuild forced to never, preflight-only stop)
   - `ODYSSEUS_TEST_MODE` forwarding via `WSLENV`
   - endpoint readiness poll before browser launch

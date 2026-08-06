@@ -6,7 +6,7 @@
 
 ## Launcher And Runtime Reliability
 
-- Verify the `Ensure-WslSystemdEnabled` path end-to-end after the stdin-piping fix in `Launch-Odysseus.ps1`, and capture failure logs when `/etc/wsl.conf` edits fail.
+- Verify the `Enable-WslSystemd` path end-to-end on a machine where `/etc/wsl.conf` lacks `systemd=true`, and capture failure logs when the edit fails.
 - Assess safe non-loopback Ollama binding guidance or remediation for WSL reachability.
 - Add troubleshooting guidance or automatic remediation when WSL cannot reach Ollama from candidate Windows host endpoints.
 - Investigate the remaining port `127.0.0.1:7000` bind conflict during compose startup and identify the owning process or namespace before adding a preflight or fallback.

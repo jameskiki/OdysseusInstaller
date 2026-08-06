@@ -29,10 +29,7 @@ $script:RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
 $script:EndpointTimeoutSec = 90
 
 function Reset-DiagState {
-    $script:DiagResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $script:DiagPass = 0
-    $script:DiagWarn = 0
-    $script:DiagFail = 0
+    $script:Diag = New-OdysseusCheckContext
 }
 
 function Write-Check {
@@ -43,14 +40,13 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
+    Write-OdysseusCheck -Context $script:Diag -Name $Name -Status $Status -Detail $Detail
+}
 
-    $script:DiagResults.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    switch ($Status) { 'FAIL' { $script:DiagFail++ }; 'WARN' { $script:DiagWarn++ }; 'PASS' { $script:DiagPass++ } }
+function New-StageResult {
+    param([string]$Stage)
+
+    return [PSCustomObject]@{ Stage = $Stage; PassCount = $script:Diag.PassCount; WarnCount = $script:Diag.WarnCount; FailCount = $script:Diag.FailCount; Results = @($script:Diag.Results) }
 }
 
 function Invoke-DiagnosticStage {
@@ -100,7 +96,7 @@ function Invoke-DiagnosticStage {
         }
     }
 
-    return [PSCustomObject]@{ Stage = 'Endpoint'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+    return New-StageResult -Stage 'Endpoint'
 }
 
 if (-not $AsLibrary) {

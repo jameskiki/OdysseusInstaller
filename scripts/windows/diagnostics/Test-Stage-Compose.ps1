@@ -30,10 +30,7 @@ Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
 $script:RequiredComposeServices = @('odysseus', 'chromadb', 'ntfy', 'searxng')
 
 function Reset-DiagState {
-    $script:DiagResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $script:DiagPass = 0
-    $script:DiagWarn = 0
-    $script:DiagFail = 0
+    $script:Diag = New-OdysseusCheckContext
 }
 
 function Write-Check {
@@ -44,26 +41,13 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
-
-    $script:DiagResults.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    switch ($Status) { 'FAIL' { $script:DiagFail++ }; 'WARN' { $script:DiagWarn++ }; 'PASS' { $script:DiagPass++ } }
+    Write-OdysseusCheck -Context $script:Diag -Name $Name -Status $Status -Detail $Detail
 }
 
-# Shared compose wrapper from Odysseus.RuntimeChecks.psm1 keeps runtime behavior
-# aligned across launcher, audit, and diagnostics while retaining stderr output.
-function Invoke-WslComposeCaptured {
-    param(
-        [Parameter(Mandatory = $true)][string]$WslDistro,
-        [Parameter(Mandatory = $true)][string]$ComposeArgs,
-        [switch]$UseSudo
-    )
+function New-StageResult {
+    param([string]$Stage)
 
-        return (Invoke-OdysseusWslComposeCaptured -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo)
+    return [PSCustomObject]@{ Stage = $Stage; PassCount = $script:Diag.PassCount; WarnCount = $script:Diag.WarnCount; FailCount = $script:Diag.FailCount; Results = @($script:Diag.Results) }
 }
 
 function Invoke-DiagnosticStage {
@@ -74,13 +58,13 @@ function Invoke-DiagnosticStage {
     $wslDistro = Resolve-OdysseusUbuntuDistro -Distros $distros
     if ([string]::IsNullOrWhiteSpace($wslDistro)) {
         Write-Check -Name 'Ubuntu distro detected' -Status FAIL -Detail 'No Ubuntu distro found. Run Test-Stage-Preflight.ps1 first.'
-        return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Compose'
     }
 
     $workspaceCheck = Invoke-OdysseusWslCommand -WslDistro $wslDistro -Command 'test -d ~/odysseus'
     if ($workspaceCheck.ExitCode -ne 0) {
         Write-Check -Name 'Odysseus workspace present' -Status FAIL -Detail '~/odysseus not found. Run Test-Stage-Bootstrap.ps1 or the launcher once first.'
-        return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Compose'
     }
     Write-Check -Name 'Odysseus workspace present' -Status PASS
 
@@ -88,22 +72,22 @@ function Invoke-DiagnosticStage {
     if ($sudoTicket.ExitCode -ne 0) {
         Write-Host '[INFO] Compose stage requires sudo access for docker on this machine.' -ForegroundColor Yellow
         Write-Host '[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus compose diagnostics:' -ForegroundColor Yellow
-        & wsl.exe -d $wslDistro -- bash -lc "sudo -v -p '[SUDO] Enter Ubuntu password for Odysseus compose diagnostics: '"
+        & wsl.exe -d $wslDistro --exec bash -lc "sudo -v -p '[SUDO] Enter Ubuntu password for Odysseus compose diagnostics: '"
         if ($LASTEXITCODE -ne 0) {
             Write-Check -Name 'Sudo authentication for compose' -Status FAIL -Detail 'Could not acquire sudo ticket for docker compose commands.'
-            return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+            return New-StageResult -Stage 'Compose'
         }
     }
     Write-Check -Name 'Sudo authentication for compose' -Status PASS
 
-    $configResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q'
+    $configResult = Invoke-OdysseusWslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q'
     if ($configResult.ExitCode -ne 0) {
-        $configResult = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q' -UseSudo
+        $configResult = Invoke-OdysseusWslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'config -q' -UseSudo
     }
     if ($configResult.ExitCode -ne 0) {
         $tail = ($configResult.Output | Select-Object -Last 30) -join "`n"
         Write-Check -Name 'Compose configuration valid' -Status FAIL -Detail "docker compose config failed:`n$tail"
-        return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Compose'
     }
     Write-Check -Name 'Compose configuration valid' -Status PASS
 
@@ -113,10 +97,10 @@ function Invoke-DiagnosticStage {
         $upResult = Invoke-OdysseusWslCompose -WslDistro $wslDistro -ComposeArgs 'up -d --build' -UseSudo -StreamOutput
     }
     if ($upResult.ExitCode -ne 0) {
-        $upDetail = Invoke-WslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'ps --format "{{.Service}} {{.State}} {{.Health}}"'
+        $upDetail = Invoke-OdysseusWslComposeCaptured -WslDistro $wslDistro -ComposeArgs 'ps --format "{{.Service}} {{.State}} {{.Health}}"'
         $tail = ($upDetail.Output | Select-Object -Last 40) -join "`n"
         Write-Check -Name 'Containers started (up -d --build)' -Status FAIL -Detail "docker compose up failed:`n$tail"
-        return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Compose'
     }
     Write-Check -Name 'Containers started (up -d --build)' -Status PASS
 
@@ -145,7 +129,7 @@ function Invoke-DiagnosticStage {
         }
     }
 
-    return [PSCustomObject]@{ Stage = 'Compose'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+    return New-StageResult -Stage 'Compose'
 }
 
 if (-not $AsLibrary) {

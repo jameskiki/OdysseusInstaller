@@ -29,10 +29,7 @@ if (-not (Test-Path $RuntimeChecksModulePath)) {
 Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
 
 function Reset-DiagState {
-    $script:DiagResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $script:DiagPass = 0
-    $script:DiagWarn = 0
-    $script:DiagFail = 0
+    $script:Diag = New-OdysseusCheckContext
 }
 
 function Write-Check {
@@ -43,14 +40,13 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
+    Write-OdysseusCheck -Context $script:Diag -Name $Name -Status $Status -Detail $Detail
+}
 
-    $script:DiagResults.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    switch ($Status) { 'FAIL' { $script:DiagFail++ }; 'WARN' { $script:DiagWarn++ }; 'PASS' { $script:DiagPass++ } }
+function New-StageResult {
+    param([string]$Stage)
+
+    return [PSCustomObject]@{ Stage = $Stage; PassCount = $script:Diag.PassCount; WarnCount = $script:Diag.WarnCount; FailCount = $script:Diag.FailCount; Results = @($script:Diag.Results) }
 }
 
 # Names that must PASS for downstream stages to have any chance of succeeding.
@@ -110,25 +106,25 @@ function Invoke-DiagnosticStage {
     $wslDistro = Resolve-OdysseusUbuntuDistro -Distros $distros
     if ([string]::IsNullOrWhiteSpace($wslDistro)) {
         Write-Check -Name 'Ubuntu distro detected' -Status FAIL -Detail 'No Ubuntu distro found. Run Test-Stage-Preflight.ps1 first.'
-        return [PSCustomObject]@{ Stage = 'Bootstrap'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Bootstrap'
     }
 
     $tempScript = Join-Path $env:TEMP 'odysseus-diag-bootstrap.sh'
     Set-Content -Path $tempScript -Value ($BootstrapDiagScript -replace "`r`n", "`n") -NoNewline -Encoding ascii
 
     $normalizedPath = (Resolve-Path -Path $tempScript).Path -replace '\\', '/'
-    $linuxSourcePath = (& wsl.exe -d $wslDistro -- wslpath -a $normalizedPath 2>$null).Trim()
+    $linuxSourcePath = (& wsl.exe -d $wslDistro --exec wslpath -a $normalizedPath 2>$null).Trim()
     if ([string]::IsNullOrWhiteSpace($linuxSourcePath) -and $normalizedPath -match '^([A-Za-z]):/(.*)$') {
         $linuxSourcePath = "/mnt/$($matches[1].ToLowerInvariant())/$($matches[2])"
     }
 
     Write-Host '[INFO] Watch for this exact prompt: [SUDO] Enter Ubuntu password for Odysseus diagnostics:' -ForegroundColor Yellow
-    & wsl.exe -d $wslDistro -- bash -lc "mkdir -p ~/.odysseus/diag && tr -d '\r' < '$linuxSourcePath' > ~/.odysseus/diag/bootstrap-check.sh && chmod +x ~/.odysseus/diag/bootstrap-check.sh && ~/.odysseus/diag/bootstrap-check.sh"
+    & wsl.exe -d $wslDistro --exec bash -lc "mkdir -p ~/.odysseus/diag && tr -d '\r' < '$linuxSourcePath' > ~/.odysseus/diag/bootstrap-check.sh && chmod +x ~/.odysseus/diag/bootstrap-check.sh && ~/.odysseus/diag/bootstrap-check.sh"
 
-    $resultsRaw = & wsl.exe -d $wslDistro -- bash -lc 'cat ~/.odysseus/diag/results.txt 2>/dev/null'
+    $resultsRaw = & wsl.exe -d $wslDistro --exec bash -lc 'cat ~/.odysseus/diag/results.txt 2>/dev/null'
     if (-not $resultsRaw) {
         Write-Check -Name 'Bootstrap diagnostics execution' -Status FAIL -Detail 'No results were produced. The WSL session may have been interrupted before checks completed.'
-        return [PSCustomObject]@{ Stage = 'Bootstrap'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Bootstrap'
     }
 
     foreach ($line in $resultsRaw) {
@@ -151,7 +147,7 @@ function Invoke-DiagnosticStage {
         }
     }
 
-    return [PSCustomObject]@{ Stage = 'Bootstrap'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+    return New-StageResult -Stage 'Bootstrap'
 }
 
 if (-not $AsLibrary) {

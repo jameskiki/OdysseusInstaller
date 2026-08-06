@@ -55,7 +55,7 @@ For repeatable launcher-only validation without prompts, installs, browser launc
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Launch-Odysseus.ps1 -TestMode
 ```
 
-The launcher also enables the same preflight-only mode when an `ODYSSEUS_TEST_MODE` file is present beside `Launch-Odysseus.ps1` or when `ODYSSEUS_TEST_MODE=1` is set in the environment.
+The launcher also enables the same preflight-only mode when `ODYSSEUS_TEST_MODE=1` is set in `odysseus-launcher.config` beside `Launch-Odysseus.ps1` or when `ODYSSEUS_TEST_MODE=1` is set in the environment.
 
 ---
 

@@ -27,10 +27,7 @@ if (-not (Test-Path $RuntimeChecksModulePath)) {
 Import-Module $RuntimeChecksModulePath -Force -ErrorAction Stop
 
 function Reset-DiagState {
-    $script:DiagResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $script:DiagPass = 0
-    $script:DiagWarn = 0
-    $script:DiagFail = 0
+    $script:Diag = New-OdysseusCheckContext
 }
 
 function Write-Check {
@@ -41,14 +38,13 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
+    Write-OdysseusCheck -Context $script:Diag -Name $Name -Status $Status -Detail $Detail
+}
 
-    $script:DiagResults.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    switch ($Status) { 'FAIL' { $script:DiagFail++ }; 'WARN' { $script:DiagWarn++ }; 'PASS' { $script:DiagPass++ } }
+function New-StageResult {
+    param([string]$Stage)
+
+    return [PSCustomObject]@{ Stage = $Stage; PassCount = $script:Diag.PassCount; WarnCount = $script:Diag.WarnCount; FailCount = $script:Diag.FailCount; Results = @($script:Diag.Results) }
 }
 
 function Invoke-DiagnosticStage {
@@ -60,14 +56,14 @@ function Invoke-DiagnosticStage {
     }
     else {
         Write-Check -Name 'WSL available' -Status FAIL -Detail "wsl.exe not found. Run the 'Prepare WSL for Odysseus' shortcut."
-        return [PSCustomObject]@{ Stage = 'Preflight'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Preflight'
     }
 
     $distros = @(Get-OdysseusInstalledWslDistros)
     $wslDistro = Resolve-OdysseusUbuntuDistro -Distros $distros
     if ([string]::IsNullOrWhiteSpace($wslDistro)) {
         Write-Check -Name 'Ubuntu distro detected' -Status FAIL -Detail "No Ubuntu distro found among: $($distros -join ', ')"
-        return [PSCustomObject]@{ Stage = 'Preflight'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+        return New-StageResult -Stage 'Preflight'
     }
     Write-Check -Name 'Ubuntu distro detected' -Status PASS -Detail "Using distro '$wslDistro'"
 
@@ -78,25 +74,12 @@ function Invoke-DiagnosticStage {
         Write-Check -Name 'Ollama localhost endpoint' -Status FAIL -Detail 'http://localhost:11434/api/tags is not reachable. Start Ollama and rerun.'
     }
 
-    $candidates = @(Get-OdysseusOllamaCandidates -WslDistro $wslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
-    $reachableVia = $null
-    $attempts = [System.Collections.Generic.List[string]]::new()
-    foreach ($candidate in $candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate.Value)) { continue }
-        $probe = Test-OdysseusWslOllamaCandidate -WslDistro $wslDistro -Host $candidate.Value -TimeoutSec 3
-        if ($probe.Success) {
-            $reachableVia = ("{0} [{1}]" -f $candidate.Value, $candidate.Source)
-            break
-        }
-        $attempts.Add(("{0} [{1}] (http={2}, curl_exit={3})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode))
-    }
-
-    if ($reachableVia) {
-        Write-Check -Name 'WSL -> Windows Ollama bridge' -Status PASS -Detail "Reachable via $reachableVia"
+    $reach = Test-OdysseusWslOllamaReachability -WslDistro $wslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -TimeoutSec 3
+    if ($reach.Success) {
+        Write-Check -Name 'WSL -> Windows Ollama bridge' -Status PASS -Detail "Reachable via $($reach.ReachableVia)"
     }
     else {
-        $attemptText = if ($attempts.Count -gt 0) { $attempts -join '; ' } else { 'no candidates available' }
-        Write-Check -Name 'WSL -> Windows Ollama bridge' -Status FAIL -Detail "No candidate host reachable from WSL. Attempts: $attemptText"
+        Write-Check -Name 'WSL -> Windows Ollama bridge' -Status FAIL -Detail "No candidate host reachable from WSL. Attempts: $($reach.AttemptSummary)"
     }
 
     $bridgeRule = Get-OdysseusFirewallRuleStatus -DisplayName 'Odysseus Ollama WSL Bridge'
@@ -107,7 +90,7 @@ function Invoke-DiagnosticStage {
         Write-Check -Name 'Ollama WSL firewall bridge rule' -Status WARN -Detail $bridgeRule.Detail
     }
 
-    return [PSCustomObject]@{ Stage = 'Preflight'; PassCount = $script:DiagPass; WarnCount = $script:DiagWarn; FailCount = $script:DiagFail; Results = @($script:DiagResults) }
+    return New-StageResult -Stage 'Preflight'
 }
 
 if (-not $AsLibrary) {

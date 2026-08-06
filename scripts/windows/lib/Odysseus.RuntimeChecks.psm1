@@ -1,4 +1,4 @@
-$script:OdysseusRuntimeChecksVersion = '0.1.0'
+$script:OdysseusRuntimeChecksVersion = '0.2.0'
 
 function Get-OdysseusRuntimeChecksVersion {
     return $script:OdysseusRuntimeChecksVersion
@@ -50,6 +50,13 @@ function Resolve-OdysseusUbuntuDistro {
     }
 
     return ($Distros | Where-Object { $_ -match '^Ubuntu(\-.*)?$' } | Select-Object -First 1)
+}
+
+function Test-OdysseusUbuntuInitialized {
+    param([Parameter(Mandatory = $true)][string]$WslDistro)
+
+    $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command 'id -un >/dev/null 2>&1' -LoginShell
+    return ($result.ExitCode -eq 0)
 }
 
 function Test-OdysseusHttpEndpoint {
@@ -178,12 +185,12 @@ function Test-OdysseusWslOllamaCandidate {
         [Parameter(Mandatory = $true)]
         [string]$WslDistro,
         [Parameter(Mandatory = $true)]
-        [string]$Host,
+        [string]$TargetHost,
         [int]$TimeoutSec = 5
     )
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $command = ('curl --noproxy "*" -sS -f --max-time {0} "http://{1}:11434/api/tags" >/dev/null 2>&1 && echo "OK|200" || echo "FAIL||1|curl_failed"' -f $TimeoutSec, $Host)
+    $command = ('curl --noproxy "*" -sS -f --max-time {0} "http://{1}:11434/api/tags" >/dev/null 2>&1 && echo "OK|200" || echo "FAIL||1|curl_failed"' -f $TimeoutSec, $TargetHost)
     $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $command
     $stopwatch.Stop()
 
@@ -194,7 +201,7 @@ function Test-OdysseusWslOllamaCandidate {
 
     $parts = $line -split '\|', 4
     return [PSCustomObject]@{
-        Host = $Host
+        Host = $TargetHost
         Success = ($parts[0] -eq 'OK')
         HttpCode = if ($parts.Count -ge 2) { $parts[1] } else { '' }
         ExitCode = if ($parts.Count -ge 3) { $parts[2] } else { '' }
@@ -203,17 +210,52 @@ function Test-OdysseusWslOllamaCandidate {
     }
 }
 
-function Invoke-OdysseusWslCompose {
+function Test-OdysseusWslOllamaReachability {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WslDistro,
-        [Parameter(Mandatory = $true)]
-        [string]$ComposeArgs,
-        [switch]$UseSudo,
-        [switch]$StreamOutput
+        [string]$HostOverride,
+        [int]$TimeoutSec = 3
     )
 
-    $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+    $candidates = @(Get-OdysseusOllamaCandidates -WslDistro $WslDistro -HostOverride $HostOverride)
+    $attempts = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate.Value)) {
+            continue
+        }
+
+        $probe = Test-OdysseusWslOllamaCandidate -WslDistro $WslDistro -TargetHost $candidate.Value -TimeoutSec $TimeoutSec
+        if ($probe.Success) {
+            return [PSCustomObject]@{
+                Success = $true
+                ReachableVia = ("{0} [{1}]" -f $candidate.Value, $candidate.Source)
+                Attempts = @($attempts)
+                AttemptSummary = ''
+            }
+        }
+
+        $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
+        $attempts.Add(("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail))
+    }
+
+    return [PSCustomObject]@{
+        Success = $false
+        ReachableVia = $null
+        Attempts = @($attempts)
+        AttemptSummary = if ($attempts.Count -gt 0) { $attempts -join '; ' } else { 'no candidates available' }
+    }
+}
+
+function Get-OdysseusComposeBashScript {
+    param(
+        [string]$SudoPrefix,
+        [string]$ComposeArgs,
+        [switch]$CaptureStderr
+    )
+
+    # Keep in sync with compose_args_from_runtime in scripts/wsl/run_odysseus.sh.
     $script = @'
 cd ~/odysseus 2>/dev/null || exit 1
 runtime_env="$HOME/.odysseus/runtime.env"
@@ -231,7 +273,24 @@ fi
 __SUDO__docker compose ${compose_args[@]} __ARGS__
 '@
 
-    $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
+    $argsSuffix = if ($CaptureStderr) { $ComposeArgs + ' 2>&1' } else { $ComposeArgs }
+    return $script.Replace('__SUDO__', $SudoPrefix).Replace('__ARGS__', $argsSuffix).Replace("`r`n", "`n")
+}
+
+function Invoke-OdysseusWslCompose {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WslDistro,
+        [Parameter(Mandatory = $true)]
+        [string]$ComposeArgs,
+        [switch]$UseSudo,
+        [switch]$StreamOutput,
+        [switch]$CaptureStderr
+    )
+
+    $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
+    $command = Get-OdysseusComposeBashScript -SudoPrefix $sudoPrefix -ComposeArgs $ComposeArgs -CaptureStderr:$CaptureStderr
+
     if ($StreamOutput) {
         $ErrorActionPreference = 'Continue'
         & wsl.exe -d $WslDistro --exec bash -lc ($command -replace '"', '\"')
@@ -245,39 +304,15 @@ __SUDO__docker compose ${compose_args[@]} __ARGS__
 }
 
 function Invoke-OdysseusWslComposeCaptured {
-        param(
-                [Parameter(Mandatory = $true)]
-                [string]$WslDistro,
-                [Parameter(Mandatory = $true)]
-                [string]$ComposeArgs,
-                [switch]$UseSudo
-        )
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WslDistro,
+        [Parameter(Mandatory = $true)]
+        [string]$ComposeArgs,
+        [switch]$UseSudo
+    )
 
-        $sudoPrefix = if ($UseSudo) { 'sudo -n ' } else { '' }
-        $script = @'
-cd ~/odysseus 2>/dev/null || exit 1
-runtime_env="$HOME/.odysseus/runtime.env"
-compose_args=()
-if [ -f "$runtime_env" ]; then
-    compose_args+=(--env-file "$runtime_env")
-    compose_files=$(grep '^COMPOSE_FILE=' "$runtime_env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
-    if [ -n "$compose_files" ]; then
-        IFS=':' read -r -a cf <<< "$compose_files"
-        for f in "${cf[@]}"; do
-            [ -n "$f" ] && compose_args+=(-f "$f")
-        done
-    fi
-fi
-__SUDO__docker compose ${compose_args[@]} __ARGS__ 2>&1
-'@
-
-        $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
-        $ErrorActionPreference = 'Continue'
-        $output = & wsl.exe -d $WslDistro --exec bash -lc ($command -replace '"', '\"') 2>$null
-        return [PSCustomObject]@{
-                ExitCode = $LASTEXITCODE
-                Output = @($output)
-        }
+    return Invoke-OdysseusWslCompose -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo -CaptureStderr
 }
 
 function Get-OdysseusComposeServiceStates {
@@ -355,18 +390,57 @@ function Get-OdysseusFirewallRuleStatus {
     }
 }
 
+function New-OdysseusCheckContext {
+    return [PSCustomObject]@{
+        Results = [System.Collections.Generic.List[PSCustomObject]]::new()
+        PassCount = 0
+        WarnCount = 0
+        FailCount = 0
+    }
+}
+
+function Write-OdysseusCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$Context,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('PASS', 'WARN', 'FAIL')]
+        [string]$Status,
+        [string]$Detail = ''
+    )
+
+    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
+    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
+    if ($Detail) {
+        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
+    }
+
+    $Context.Results.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
+    switch ($Status) {
+        'PASS' { $Context.PassCount++ }
+        'WARN' { $Context.WarnCount++ }
+        'FAIL' { $Context.FailCount++ }
+    }
+}
+
 Export-ModuleMember -Function @(
     'Get-OdysseusRuntimeChecksVersion',
     'Invoke-OdysseusWslCommand',
     'Get-OdysseusInstalledWslDistros',
     'Resolve-OdysseusUbuntuDistro',
+    'Test-OdysseusUbuntuInitialized',
     'Test-OdysseusHttpEndpoint',
     'Get-OdysseusWslGatewayIp',
     'Get-OdysseusDefaultRouteAdapterIpv4',
     'Get-OdysseusOllamaCandidates',
     'Test-OdysseusWslOllamaCandidate',
+    'Test-OdysseusWslOllamaReachability',
     'Invoke-OdysseusWslCompose',
     'Invoke-OdysseusWslComposeCaptured',
     'Get-OdysseusComposeServiceStates',
-    'Get-OdysseusFirewallRuleStatus'
+    'Get-OdysseusFirewallRuleStatus',
+    'New-OdysseusCheckContext',
+    'Write-OdysseusCheck'
 )

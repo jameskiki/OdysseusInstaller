@@ -86,10 +86,18 @@ end;
 function RunPowerShellExitCheck(const Script: string): Integer;
 var
   ResultCode: Integer;
+  ScriptFile: string;
 begin
+  { Run via a temp script file so embedded quotes can never break the command line. }
+  ScriptFile := ExpandConstant('{tmp}\odysseus-check.ps1');
+  if not SaveStringToFile(ScriptFile, Script, False) then begin
+    Result := -1;
+    exit;
+  end;
+
   if Exec(
     ExpandConstant('{sysnative}\windowspowershell\v1.0\powershell.exe'),
-    '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptFile + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     Result := ResultCode
   else
@@ -153,9 +161,9 @@ begin
   if RepoBranchesLoaded then
     exit;
 
-  RepoDefaultBranch := 'main';
+  RepoDefaultBranch := 'dev';
   RepoRefCombo.Items.Clear;
-  RepoRefCombo.Items.Add('main');
+  RepoRefCombo.Items.Add('dev');
   RepoRefCombo.ItemIndex := 0;
   RepoRefStatusLabel.Caption := 'Loading remote branches from GitHub...';
 
@@ -168,7 +176,7 @@ begin
     '$ProgressPreference = ''SilentlyContinue''; ' +
     '$repo = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus''; ' +
     '$default = $repo.default_branch; ' +
-    'if (-not $default) { $default = ''main'' }; ' +
+    'if (-not $default) { $default = ''dev'' }; ' +
     '$resp = Invoke-RestMethod -UseBasicParsing -Uri ''https://api.github.com/repos/pewdiepie-archdaemon/odysseus/branches?per_page=100''; ' +
     '$names = @($resp | ForEach-Object { $_.name } | Where-Object { $_ } | Sort-Object -Unique); ' +
     'if ($names.Count -eq 0) { $names = @($default) }; ' +
@@ -198,10 +206,10 @@ begin
         MainIndex := RepoRefCombo.Items.Count - 1;
     end;
 
-    if RepoRefCombo.Items.Count = 0 then begin
-      RepoRefCombo.Items.Add('main');
+    if (RepoRefCombo.Items.Count = 0) then begin
+      RepoRefCombo.Items.Add('dev');
       RepoRefCombo.ItemIndex := 0;
-      RepoRefStatusLabel.Caption := 'No branches returned by GitHub. Defaulted to "main".';
+      RepoRefStatusLabel.Caption := 'No branches returned by GitHub. Defaulted to "dev".';
     end
     else begin
       if RepoRefCombo.Items.IndexOf(RepoDefaultBranch) >= 0 then
@@ -318,7 +326,7 @@ procedure InitializeWizard;
 var
   LinkLabel: TNewLinkLabel;
 begin
-  RepoDefaultBranch := 'main';
+  RepoDefaultBranch := 'dev';
 
   WizardForm.LicenseMemo.Height := WizardForm.LicenseMemo.Height - ScaleY(24);
   WizardForm.LicenseAcceptedRadio.Top := WizardForm.LicenseAcceptedRadio.Top - ScaleY(24);
@@ -378,7 +386,7 @@ begin
   RepoRefCombo.Left := ScaleX(8);
   RepoRefCombo.Top := ScaleY(18);
   RepoRefCombo.Width := RepoRefPage.SurfaceWidth - ScaleX(16);
-  RepoRefCombo.Items.Add('main');
+  RepoRefCombo.Items.Add('dev');
   RepoRefCombo.ItemIndex := 0;
 
   RepoRefStatusLabel := TNewStaticText.Create(RepoRefPage);
@@ -589,10 +597,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   WslCheckCode: Integer;
-  HostModeFile: string;
-  RepoRefFile: string;
-  RebuildModeFile: string;
-  RepoSyncModeFile: string;
+  LauncherConfig: string;
   SelectedRepoRef: string;
   SelectedRebuildMode: string;
 begin
@@ -601,24 +606,24 @@ begin
 
     SelectedRebuildMode := GetSelectedRebuildMode;
 
-    RepoRefFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF';
-    SaveStringToFile(RepoRefFile, SelectedRepoRef, False);
+    { Single launcher config replaces the former per-key marker files. }
+    LauncherConfig :=
+      'ODYSSEUS_REPO_REF=' + SelectedRepoRef + #13#10 +
+      'ODYSSEUS_REBUILD_MODE=' + SelectedRebuildMode + #13#10 +
+      'ODYSSEUS_REPO_SYNC_MODE=managed-clean' + #13#10;
+    if IsHostSelected then
+      LauncherConfig := LauncherConfig + 'ODYSSEUS_HOST_MODE=1' + #13#10
+    else
+      LauncherConfig := LauncherConfig + 'ODYSSEUS_HOST_MODE=0' + #13#10;
 
-    RebuildModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE';
-    SaveStringToFile(RebuildModeFile, SelectedRebuildMode, False);
+    SaveStringToFile(ExpandConstant('{app}') + '\odysseus-launcher.config', LauncherConfig, False);
 
-    RepoSyncModeFile := ExpandConstant('{app}') + '\ODYSSEUS_REPO_SYNC_MODE';
-    SaveStringToFile(RepoSyncModeFile, 'managed-clean', False);
-
-    if IsHostSelected then begin
-      HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
-      SaveStringToFile(HostModeFile, 'true', False);
-    end
-    else begin
-      HostModeFile := ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE';
-      if FileExists(HostModeFile) then
-        DeleteFile(HostModeFile);
-    end;
+    { Remove legacy marker files from earlier installer versions. }
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REPO_REF');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REBUILD_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_REPO_SYNC_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_HOST_MODE');
+    DeleteFile(ExpandConstant('{app}') + '\ODYSSEUS_TEST_MODE');
 
     { Readiness check only: exit 10 = WSL absent, exit 11 = Ubuntu absent, exit 0 = both present }
     if not Exec(

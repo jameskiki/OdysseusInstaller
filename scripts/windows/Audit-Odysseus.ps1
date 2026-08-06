@@ -36,9 +36,7 @@ catch {
     throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required audit files."
 }
 
-$script:results = [System.Collections.Generic.List[PSCustomObject]]::new()
-$script:failCount = 0
-$script:warnCount = 0
+$script:CheckContext = New-OdysseusCheckContext
 
 function Write-Check {
     param(
@@ -48,15 +46,7 @@ function Write-Check {
         [string]$Detail = ''
     )
 
-    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Status]
-    Write-Host ("[{0}] {1}" -f $Status, $Name) -ForegroundColor $color
-    if ($Detail) {
-        Write-Host ("    -> {0}" -f $Detail) -ForegroundColor DarkGray
-    }
-
-    $script:results.Add([PSCustomObject]@{ Name = $Name; Status = $Status; Detail = $Detail })
-    if ($Status -eq 'FAIL') { $script:failCount++ }
-    elseif ($Status -eq 'WARN') { $script:warnCount++ }
+    Write-OdysseusCheck -Context $script:CheckContext -Name $Name -Status $Status -Detail $Detail
 }
 
 function Write-Section {
@@ -71,32 +61,6 @@ function Invoke-Wsl {
 
     $result = Invoke-OdysseusWslCommand -WslDistro $WslDistro -Command $Command
     return @($result.Output)
-}
-
-function Test-WslOllamaCandidate {
-    param([string]$Host)
-
-    return (Test-OdysseusWslOllamaCandidate -WslDistro $WslDistro -Host $Host -TimeoutSec 5)
-}
-
-function Invoke-WslCompose {
-        param(
-                [string]$ComposeArgs,
-                [switch]$UseSudo
-        )
-
-        $result = Invoke-OdysseusWslCompose -WslDistro $WslDistro -ComposeArgs $ComposeArgs -UseSudo:$UseSudo
-        return @($result.Output)
-}
-
-function Get-InstalledWslDistros {
-    return @(Get-OdysseusInstalledWslDistros)
-}
-
-function Resolve-UbuntuDistro {
-    param([string[]]$Distros)
-
-    return (Resolve-OdysseusUbuntuDistro -Distros $Distros)
 }
 
 function Test-HttpOk {
@@ -171,8 +135,8 @@ if (-not $hasWsl) {
 else {
     Write-Check -Name "WSL available" -Status PASS
 
-    $distros = Get-InstalledWslDistros
-    $WslDistro = Resolve-UbuntuDistro -Distros $distros
+    $distros = @(Get-OdysseusInstalledWslDistros)
+    $WslDistro = Resolve-OdysseusUbuntuDistro -Distros $distros
     if (-not [string]::IsNullOrWhiteSpace($WslDistro)) {
         Write-Check -Name "Ubuntu distro present" -Status PASS -Detail ("Using distro '{0}'" -f $WslDistro)
 
@@ -188,32 +152,12 @@ else {
         else {
             Write-Check -Name "WSL host gateway" -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-            $candidates = @(Get-OdysseusOllamaCandidates -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)
-
-            $reachableVia = $null
-            $attempted = [System.Collections.Generic.List[string]]::new()
-            $attemptDetails = [System.Collections.Generic.List[string]]::new()
-            foreach ($candidate in $candidates) {
-                if ([string]::IsNullOrWhiteSpace($candidate.Value)) { continue }
-                $attempted.Add($candidate.Value)
-
-                $probe = Test-WslOllamaCandidate -Host $candidate.Value
-                if ($probe.Success) {
-                    $reachableVia = "{0} [{1}]" -f $candidate.Value, $candidate.Source
-                    break
-                }
-
-                $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
-                $attemptDetails.Add(("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail))
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {
-                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reachableVia)
+            $reach = Test-OdysseusWslOllamaReachability -WslDistro $WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -TimeoutSec 5
+            if ($reach.Success) {
+                Write-Check -Name "Ollama reachable from WSL" -Status PASS -Detail ("Reachable via {0}" -f $reach.ReachableVia)
             }
             else {
-                $attemptedText = if ($attempted.Count -gt 0) { $attempted -join ', ' } else { 'none' }
-                $detailText = if ($attemptDetails.Count -gt 0) { $attemptDetails -join '; ' } else { 'no candidate diagnostics available' }
-                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL for candidates: {0}. Details: {1}" -f $attemptedText, $detailText)
+                Write-Check -Name "Ollama reachable from WSL" -Status FAIL -Detail ("curl to /api/tags failed from WSL. Attempts: {0}" -f $reach.AttemptSummary)
             }
         }
     }
@@ -327,13 +271,11 @@ if ($CheckLanReachability) {
 }
 
 Write-Host ""
-$verdict = if ($script:failCount -gt 0) { 'DOWN' } elseif ($script:warnCount -gt 0) { 'DEGRADED' } else { 'READY' }
+$verdict = if ($script:CheckContext.FailCount -gt 0) { 'DOWN' } elseif ($script:CheckContext.WarnCount -gt 0) { 'DEGRADED' } else { 'READY' }
 $verdictColor = @{ READY = 'Green'; DEGRADED = 'Yellow'; DOWN = 'Red' }[$verdict]
-$passCount = ($script:results | Where-Object { $_.Status -eq 'PASS' }).Count
-$totalCount = $script:results.Count
 
 Write-Host ("Verdict: {0}" -f $verdict) -ForegroundColor $verdictColor
-Write-Host ("Checks: {0}/{1} passed, {2} warning(s), {3} failure(s)" -f $passCount, $totalCount, $script:warnCount, $script:failCount)
+Write-Host ("Checks: {0}/{1} passed, {2} warning(s), {3} failure(s)" -f $script:CheckContext.PassCount, $script:CheckContext.Results.Count, $script:CheckContext.WarnCount, $script:CheckContext.FailCount)
 
-if ($script:failCount -gt 0) { exit 1 }
+if ($script:CheckContext.FailCount -gt 0) { exit 1 }
 exit 0

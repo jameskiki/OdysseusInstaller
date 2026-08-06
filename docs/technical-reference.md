@@ -13,7 +13,7 @@ This document describes the current installer pipeline and runtime behavior for 
 | `scripts/windows/Prepare-WslForOdysseus.ps1` | User-facing WSL and Ubuntu preparation helper shipped by the installer |
 | `scripts/wsl/run_odysseus.sh` | Linux bootstrap script executed in WSL Ubuntu |
 | `scripts/windows/Audit-Odysseus.ps1` | Read-only health audit script for runtime diagnostics |
-| `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared read-only runtime checks consumed by launcher and audit to reduce drift |
+| `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared runtime checks and check-reporting helpers consumed by launcher, audit, and diagnostics to reduce drift |
 | `tools/windows/` | Maintainer-only build and signing scripts kept out of the runtime surface |
 
 ---
@@ -34,7 +34,7 @@ The installer has five meaningful pages:
 - Remote install skips repo ref and rebuild pages.
 - Local install skips remote host-IP page.
 
-For local installs, branch selection defaults to the repository's current GitHub `default_branch` when it can be fetched; otherwise it falls back to `main`.
+For local installs, branch selection defaults to the repository's current GitHub `default_branch` when it can be fetched; otherwise it falls back to `dev`.
 
 ### Key functions
 
@@ -66,11 +66,13 @@ Shortcuts created:
 - `Odysseus Health Audit` (desktop)
 - `Connect to Shared Odysseus` (remote mode)
 
-Local-mode sentinel files written under `{app}`:
-- `ODYSSEUS_HOST_MODE`
+Local-mode launcher config written under `{app}` as `odysseus-launcher.config` (single `key=value` file):
+- `ODYSSEUS_HOST_MODE` (`1|0`)
 - `ODYSSEUS_REPO_REF`
 - `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean` for installer-managed local flow)
 - `ODYSSEUS_REBUILD_MODE`
+
+Legacy per-key marker files from earlier installer versions are deleted during install.
 
 ### Host firewall rule
 
@@ -86,13 +88,14 @@ The launcher assumes WSL2 + Ubuntu were already installed and initialized before
 
 ### Runtime preferences and env forwarding
 
-- Reads repo ref from `ODYSSEUS_REPO_REF` (default `main`).
-- Reads repo sync mode from `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`, default `managed-ff` when unset).
-- Reads rebuild mode from `ODYSSEUS_REBUILD_MODE` (`ask|always|never`).
-- Reads host mode from `ODYSSEUS_HOST_MODE` presence.
-- Reads launcher test mode from any of:
+- Reads runtime preferences from `odysseus-launcher.config` beside the launcher (keys below).
+- Repo ref from `ODYSSEUS_REPO_REF` (default `dev`).
+- Repo sync mode from `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`, default `managed-ff` when unset).
+- Rebuild mode from `ODYSSEUS_REBUILD_MODE` (`ask|always|never`).
+- Host mode from `ODYSSEUS_HOST_MODE` (`1|true|yes`).
+- Launcher test mode from any of:
   - `-TestMode` switch
-  - `ODYSSEUS_TEST_MODE` marker file beside the launcher
+  - `ODYSSEUS_TEST_MODE=1` key in `odysseus-launcher.config`
   - `ODYSSEUS_TEST_MODE=1|true|yes` environment value
 - Exports to WSL through `WSLENV`:
   - `ODYSSEUS_HOST_MODE`
@@ -111,9 +114,9 @@ When launcher test mode is active, rebuild mode is forced to `never` and interac
 3. Resolve Ubuntu distro dynamically via `Resolve-UbuntuDistro`:
    - Prefers `Ubuntu`
    - Supports variants like `Ubuntu-22.04`
-4. Ensure Ubuntu first-run initialization is complete (`Ensure-UbuntuInitialized`).
-5. Ensure WSL systemd is enabled (`Ensure-WslSystemdEnabled`), update `/etc/wsl.conf` if needed, then restart WSL.
-6. Ensure Ollama availability (`Ensure-OllamaAvailable`) and all-interface binding (`Ensure-OllamaEndpoint`).
+4. Ensure Ubuntu first-run initialization is complete (`Confirm-UbuntuInitialized`).
+5. Ensure WSL systemd is enabled (`Enable-WslSystemd`), update `/etc/wsl.conf` if needed, then restart WSL.
+6. Ensure Ollama availability (`Install-OllamaIfMissing`) and all-interface binding (`Initialize-OllamaEndpoint`).
 7. Stage `run_odysseus.sh` into Ubuntu (`~/run_odysseus.sh`) with LF normalization.
 8. Execute Linux bootstrap script.
 9. Poll Odysseus endpoint readiness (`http://localhost:7000`) with retry loop.
