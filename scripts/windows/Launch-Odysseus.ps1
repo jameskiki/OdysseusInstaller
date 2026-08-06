@@ -166,7 +166,8 @@ END {
     $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
     $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
 
-    & wsl.exe -d $WslDistro -u root -- bash -c $bashCmd
+    # PS 5.1 does not escape embedded quotes for native commands.
+    & wsl.exe -d $WslDistro -u root -- bash -c ($bashCmd -replace '"', '\"')
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
     }
@@ -477,7 +478,7 @@ function Test-OdysseusRuntimeHealth {
             }
 
             $detail = if (-not [string]::IsNullOrWhiteSpace($probe.Detail)) { $probe.Detail } else { 'probe_failed' }
-            $attempts.Add("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail)
+            $attempts.Add(("{0} [{1}] (http={2}, curl_exit={3}, elapsed_ms={4}, detail={5})" -f $candidate.Value, $candidate.Source, $probe.HttpCode, $probe.ExitCode, $probe.ElapsedMs, $detail))
         }
 
         if (-not [string]::IsNullOrWhiteSpace($reachableVia)) {

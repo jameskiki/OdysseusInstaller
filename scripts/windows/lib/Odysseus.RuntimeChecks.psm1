@@ -21,7 +21,9 @@ function Invoke-OdysseusWslCommand {
     }
 
     $shellFlag = if ($LoginShell) { '-lc' } else { '-c' }
-    $output = & wsl.exe -d $WslDistro -- bash $shellFlag $Command 2>$null
+    # PS 5.1 does not escape embedded quotes for native commands; escape them so bash receives them intact.
+    $escapedCommand = $Command -replace '"', '\"'
+    $output = & wsl.exe -d $WslDistro -- bash $shellFlag $escapedCommand 2>$null
     return [PSCustomObject]@{
         ExitCode = $LASTEXITCODE
         Output = @($output)
@@ -228,7 +230,7 @@ __SUDO__docker compose ${compose_args[@]} __ARGS__
 
     $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
     if ($StreamOutput) {
-        & wsl.exe -d $WslDistro -- bash -lc $command
+        & wsl.exe -d $WslDistro -- bash -lc ($command -replace '"', '\"')
         return [PSCustomObject]@{
             ExitCode = $LASTEXITCODE
             Output = @()
@@ -266,7 +268,7 @@ __SUDO__docker compose ${compose_args[@]} __ARGS__ 2>&1
 '@
 
         $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
-        $output = & wsl.exe -d $WslDistro -- bash -lc $command
+        $output = & wsl.exe -d $WslDistro -- bash -lc ($command -replace '"', '\"')
         return [PSCustomObject]@{
                 ExitCode = $LASTEXITCODE
                 Output = @($output)
