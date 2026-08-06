@@ -67,7 +67,8 @@ function Test-OdysseusHttpEndpoint {
     )
 
     try {
-        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 0 -ErrorAction Stop
+        # -MaximumRedirection 0 throws InvalidOperationException (null Response) even on a plain 200 in PS 5.1; allow real redirects instead.
+        $resp = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 5 -ErrorAction Stop
         return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
     }
     catch {
