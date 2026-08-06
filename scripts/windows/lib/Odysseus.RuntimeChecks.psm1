@@ -20,10 +20,13 @@ function Invoke-OdysseusWslCommand {
         }
     }
 
+    # Native stderr must not become terminating under the caller's EAP=Stop (PS 5.1 gotcha).
+    $ErrorActionPreference = 'Continue'
     $shellFlag = if ($LoginShell) { '-lc' } else { '-c' }
     # PS 5.1 does not escape embedded quotes for native commands; escape them so bash receives them intact.
     $escapedCommand = $Command -replace '"', '\"'
-    $output = & wsl.exe -d $WslDistro -- bash $shellFlag $escapedCommand 2>$null
+    # --exec bypasses WSL's intermediate shell, which would pre-expand $vars and strip quotes.
+    $output = & wsl.exe -d $WslDistro --exec bash $shellFlag $escapedCommand 2>$null
     return [PSCustomObject]@{
         ExitCode = $LASTEXITCODE
         Output = @($output)
@@ -230,7 +233,8 @@ __SUDO__docker compose ${compose_args[@]} __ARGS__
 
     $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
     if ($StreamOutput) {
-        & wsl.exe -d $WslDistro -- bash -lc ($command -replace '"', '\"')
+        $ErrorActionPreference = 'Continue'
+        & wsl.exe -d $WslDistro --exec bash -lc ($command -replace '"', '\"')
         return [PSCustomObject]@{
             ExitCode = $LASTEXITCODE
             Output = @()
@@ -268,7 +272,8 @@ __SUDO__docker compose ${compose_args[@]} __ARGS__ 2>&1
 '@
 
         $command = $script.Replace('__SUDO__', $sudoPrefix).Replace('__ARGS__', $ComposeArgs).Replace("`r`n", "`n")
-        $output = & wsl.exe -d $WslDistro -- bash -lc ($command -replace '"', '\"')
+        $ErrorActionPreference = 'Continue'
+        $output = & wsl.exe -d $WslDistro --exec bash -lc ($command -replace '"', '\"') 2>$null
         return [PSCustomObject]@{
                 ExitCode = $LASTEXITCODE
                 Output = @($output)

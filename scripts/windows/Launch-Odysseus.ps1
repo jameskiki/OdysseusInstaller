@@ -166,8 +166,8 @@ END {
     $awkOneLine = ($awkScript -replace "`r`n", ' ' -replace "`r", ' ' -replace "`n", ' ').Trim()
     $bashCmd = "touch /etc/wsl.conf && awk '$awkOneLine' /etc/wsl.conf > /etc/wsl.conf.new && mv /etc/wsl.conf.new /etc/wsl.conf"
 
-    # PS 5.1 does not escape embedded quotes for native commands.
-    & wsl.exe -d $WslDistro -u root -- bash -c ($bashCmd -replace '"', '\"')
+    # --exec avoids WSL's intermediate shell; PS 5.1 needs embedded quotes escaped for native args.
+    & wsl.exe -d $WslDistro -u root --exec bash -c ($bashCmd -replace '"', '\"')
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to update /etc/wsl.conf for systemd support (exit code $LASTEXITCODE)."
     }
