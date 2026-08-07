@@ -1,6 +1,6 @@
 # Technical Reference
 
-This document describes the current installer pipeline and runtime behavior for this repository.
+This document describes current local-installer pipeline and runtime behavior.
 
 ---
 
@@ -8,223 +8,174 @@ This document describes the current installer pipeline and runtime behavior for 
 
 | File | Role |
 |---|---|
-| `installer/installer.iss` | Inno Setup script that builds the Windows installer and defines wizard logic |
+| `installer/installer.iss` | Inno Setup script and local installer wizard logic |
 | `scripts/windows/Launch-Odysseus.ps1` | Windows launcher/orchestration script |
-| `scripts/windows/Prepare-WslForOdysseus.ps1` | User-facing WSL and Ubuntu preparation helper shipped by the installer |
+| `scripts/windows/Prepare-WslForOdysseus.ps1` | WSL and Ubuntu preparation helper |
 | `scripts/wsl/run_odysseus.sh` | Linux bootstrap script executed in WSL Ubuntu |
-| `scripts/windows/Audit-Odysseus.ps1` | Read-only health audit script for runtime diagnostics |
-| `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared runtime checks and check-reporting helpers consumed by launcher, audit, and diagnostics to reduce drift |
-| `tools/windows/` | Maintainer-only build and signing scripts kept out of the runtime surface |
+| `scripts/windows/Audit-Odysseus.ps1` | Read-only health audit script |
+| `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared runtime checks used by launcher/audit/diagnostics |
+| `tools/windows/diagnostics/` | Maintainer-only staged diagnostics scripts |
+| `tools/windows/` | Maintainer-only build/sign tooling |
 
 ---
 
-## 1. Inno Setup Wizard (`installer/installer.iss`)
+## 1. Installer (`installer/installer.iss`)
 
 ### Wizard flow
 
-The installer has five meaningful pages:
+The installer is local-only and keeps a minimal flow:
 
 1. Licence agreement.
-2. Deployment type (local vs remote, with optional host mode).
-3. Odysseus version selection (`RepoRefPage`).
-4. Container rebuild preference (`RebuildModePage`).
-5. Host IP input (`IPPage`) for remote mode.
+2. Local installation info page.
+3. Ready/summary page.
 
-`ShouldSkipPage` conditionally skips pages depending on selected deployment mode:
-- Remote install skips repo ref and rebuild pages.
-- Local install skips remote host-IP page.
-
-For local installs, branch selection defaults to the repository's current GitHub `default_branch` when it can be fetched; otherwise it falls back to `dev`.
-
-### Key functions
-
-| Function | Purpose |
-|---|---|
-| `IsLocalInstallation` | True when local mode is selected |
-| `IsRemoteInstallation` | True when remote mode is selected |
-| `IsHostSelected` | True when local mode + host checkbox are selected |
-| `GetSelectedRebuildMode` | Returns `ask`, `always`, or `never` |
-| `GetRemoteIP` | Returns trimmed remote host IP, defaulting to `127.0.0.1` |
-| `NextButtonClick` | Validates GPU warning path, remote IP, and repo ref inputs |
-| `CurStepChanged` (`ssPostInstall`) | Writes installer sentinel files and performs WSL/Ubuntu readiness checks with prerequisite guidance |
-
-WSL behavior in the installer is readiness-check only.
-- The installer does not run `wsl --install` or bootstrap Ubuntu automatically.
-- If WSL or Ubuntu is missing, it shows a blocking guidance message telling the user to install WSL2 + Ubuntu manually, reboot if required, launch Ubuntu once to create the Linux user, and then rerun Odysseus.
-- If both are present, it shows the normal ready-to-launch message.
+There is no remote/shared-instance wizard mode and no branch-selection page.
 
 ### Installer outputs and shortcuts
 
-For local installs, the setup copies:
+Setup copies:
+
 - `Launch-Odysseus.ps1`
+- `Prepare-WslForOdysseus.ps1`
 - `run_odysseus.sh`
 - `Audit-Odysseus.ps1`
+- `lib/Odysseus.RuntimeChecks.psm1`
 
 Shortcuts created:
+
 - `Launch Odysseus (Local)`
-- `Odysseus Health Audit` (start menu)
-- `Odysseus Health Audit` (desktop)
-- `Connect to Shared Odysseus` (remote mode)
+- `Prepare WSL for Odysseus` (Start menu + desktop)
+- `Odysseus Health Audit` (Start menu + desktop)
 
-Local-mode launcher config written under `{app}` as `odysseus-launcher.config` (single `key=value` file):
-- `ODYSSEUS_HOST_MODE` (`1|0`)
-- `ODYSSEUS_REPO_REF`
-- `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean` for installer-managed local flow)
-- `ODYSSEUS_REBUILD_MODE`
+### Launcher config seed
 
-Legacy per-key marker files from earlier installer versions are deleted during install.
+Installer writes one local config file under `{app}`:
 
-### Host firewall rule
+- `odysseus-launcher.config`
 
-When host mode is selected, installer run actions add a Windows Firewall inbound rule for TCP 7000 (`private,domain`) to allow LAN clients to reach the Odysseus UI.
+Default values:
+
+- `ODYSSEUS_REPO_REF=dev`
+- `ODYSSEUS_REPO_SYNC_MODE=managed-clean`
+- `ODYSSEUS_REBUILD_MODE=ask`
+- `ODYSSEUS_HOST_MODE=0`
+
+Legacy marker files are removed during install.
+
+### WSL readiness behavior
+
+Installer performs readiness checks only:
+
+- It does not run `wsl --install` automatically.
+- If WSL/Ubuntu is missing, it prompts user to run the prep shortcut.
+
+### Firewall behavior
+
+Installer configures inbound TCP `11434` rule (`Odysseus Ollama WSL Bridge`) for WSL-to-Windows Ollama traffic.
 
 ---
 
 ## 2. Launcher (`scripts/windows/Launch-Odysseus.ps1`)
 
-The launcher is the Windows-side orchestrator and includes transcript logging, WSL checks, bootstrap execution, and live runtime monitoring.
-
-The launcher assumes WSL2 + Ubuntu were already installed and initialized before launch.
-
-### Runtime preferences and env forwarding
-
-- Reads runtime preferences from `odysseus-launcher.config` beside the launcher (keys below).
-- Repo ref from `ODYSSEUS_REPO_REF` (default `dev`).
-- Repo sync mode from `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`, default `managed-ff` when unset).
-- Rebuild mode from `ODYSSEUS_REBUILD_MODE` (`ask|always|never`).
-- Host mode from `ODYSSEUS_HOST_MODE` (`1|true|yes`).
-- Launcher test mode from any of:
-  - `-TestMode` switch
-  - `ODYSSEUS_TEST_MODE=1` key in `odysseus-launcher.config`
-  - `ODYSSEUS_TEST_MODE=1|true|yes` environment value
-- Exports to WSL through `WSLENV`:
-  - `ODYSSEUS_HOST_MODE`
-  - `ODYSSEUS_REPO_REF`
-  - `ODYSSEUS_REPO_SYNC_MODE`
-  - `ODYSSEUS_REBUILD`
-  - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
-  - `ODYSSEUS_TEST_MODE`
-
-When launcher test mode is active, rebuild mode is forced to `never` and interactive prompts are suppressed.
-
-### Main pipeline
+Launcher responsibilities:
 
 1. Start transcript logging under `%LOCALAPPDATA%\Odysseus\Logs`.
-2. Validate `wsl.exe` availability.
-3. Resolve Ubuntu distro dynamically via `Resolve-UbuntuDistro`:
-   - Prefers `Ubuntu`
-   - Supports variants like `Ubuntu-22.04`
-4. Ensure Ubuntu first-run initialization is complete (`Confirm-UbuntuInitialized`).
-5. Ensure WSL systemd is enabled (`Enable-WslSystemd`), update `/etc/wsl.conf` if needed, then restart WSL.
-6. Ensure Ollama availability (`Install-OllamaIfMissing`) and all-interface binding (`Initialize-OllamaEndpoint`).
-7. Stage `run_odysseus.sh` into Ubuntu (`~/run_odysseus.sh`) with LF normalization.
-8. Execute Linux bootstrap script.
-9. Poll Odysseus endpoint readiness (`http://localhost:7000`) with retry loop.
-10. Open browser.
-11. Start `Start-OdysseusWatchdog` loop (10s interval, `auto-heal-light`).
+2. Verify WSL and resolve Ubuntu distro (`Ubuntu` / `Ubuntu-*`).
+3. Ensure Ubuntu first-run init is complete.
+4. Ensure systemd setup required for runtime.
+5. Ensure Ollama availability and reachability setup.
+6. Stage and run WSL bootstrap (`run_odysseus.sh`).
+7. Poll app endpoint readiness (`http://localhost:7000`).
+8. Open browser.
+9. Start watchdog monitoring loop.
 
-When test mode is enabled, the launcher stops after preflight validation and transcript shutdown. It skips Ollama installation checks, Linux bootstrap, endpoint polling, browser launch, and watchdog startup.
+### Runtime preferences and forwarding
 
-### Watchdog behavior
+Launcher reads `odysseus-launcher.config` and supports config/env override behavior:
 
-The watchdog continuously checks:
-- WSL command execution
-- Windows Ollama localhost endpoint
-- WSL gateway reachability to Ollama
-- `dockerd` process
-- Required compose services (`odysseus`, `chromadb`, `ntfy`, `searxng`)
-- Odysseus HTTP endpoint (`http://localhost:7000`)
+- `ODYSSEUS_REPO_REF`
+- `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`)
+- `ODYSSEUS_REBUILD_MODE` (`ask|always|never`)
+- `ODYSSEUS_HOST_MODE`
+- `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- `ODYSSEUS_TEST_MODE`
 
-On drift, it attempts lightweight recovery with `docker compose up -d` using the runtime profile under `~/.odysseus/runtime.env` (with non-interactive sudo fallback).
+Forwarded into WSL via `WSLENV`:
+
+- `ODYSSEUS_HOST_MODE`
+- `ODYSSEUS_REPO_REF`
+- `ODYSSEUS_REPO_SYNC_MODE`
+- `ODYSSEUS_REBUILD`
+- `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- `ODYSSEUS_TEST_MODE`
+
+### Test mode
+
+`-TestMode` or `ODYSSEUS_TEST_MODE=1` causes preflight-only behavior:
+
+- No bootstrap run
+- No browser launch
+- No watchdog startup
 
 ---
 
 ## 3. Linux Bootstrap (`scripts/wsl/run_odysseus.sh`)
 
-This script runs inside WSL Ubuntu and installs/updates dependencies, syncs Odysseus source, writes machine-local runtime configuration, and starts containers.
+Bootstrap handles dependency readiness, source sync, runtime env generation, compose startup, and endpoint checks.
 
-### Core reliability helpers
+### Runtime state location
 
-- `wait_for_apt_unlock`: waits for apt/dpkg locks.
-- `ensure_dpkg_consistent`: repairs interrupted package states.
-- `run_apt_update`: apt update with retries and timeout configuration.
-- `run_with_progress`: spinner/progress wrapper with log tail on failure.
-- `ensure_port_7000_available_for_compose`: fails early when port 7000 is already owned by a non-Odysseus listener, with actionable diagnostics.
-
-### Runtime configuration location
-
-Runtime state is stored outside the git-tracked repo so branch updates remain clean:
 - `~/.odysseus/runtime.env`
-- `~/.odysseus/docker-compose.host-mode.override.yml` (host mode only)
+- `~/.odysseus/docker-compose.host-mode.override.yml` (when host mode enabled)
 
-The script seeds `runtime.env` from `~/odysseus/.env.example` when available, then updates runtime keys there.
+### Endpoint and host discovery
 
-### Networking and endpoint configuration
+`resolve_windows_ollama_host` probes candidates in order:
 
-- `resolve_windows_ollama_host`: discovers the best Windows host endpoint in this order: explicit override, Windows default-route IPv4, resolv.conf nameserver, default route gateway, then `host.docker.internal`.
-- `configure_gateway_endpoints_runtime`: updates runtime env keys via `upsert_env_key`:
-  - `LLM_HOST`
-  - `LLM_HOSTS`
-  - `OLLAMA_BASE_URL`
-  - `EMBEDDING_URL`
-- `audit_ollama_gateway`: verifies WSL can reach Windows-hosted Ollama.
+1. Explicit override (`ODYSSEUS_WINDOWS_HOST_OVERRIDE`)
+2. Windows default-route IPv4
+3. WSL resolver nameserver
+4. WSL default gateway
+5. `host.docker.internal`
 
-### Compose profile selection
+### Repo sync behavior
 
-`configure_compose_files_runtime` dynamically sets `COMPOSE_FILE` in `~/.odysseus/runtime.env`:
-- base: absolute path to `~/odysseus/docker-compose.yml`
-- NVIDIA: add absolute path to `~/odysseus/docker-compose.gpu-nvidia.yml` when GPU tooling is available
-- host mode: generates `~/.odysseus/docker-compose.host-mode.override.yml` and appends it
+Uses `ODYSSEUS_REPO_REF` and `ODYSSEUS_REPO_SYNC_MODE`:
 
-Compose startup consumes this runtime profile explicitly (`--env-file` and `-f` flags), rather than mutating files inside `~/odysseus`.
+- `managed-clean`
+- `managed-ff`
+- `unmanaged`
 
-### Docker and permissions
+### Compose behavior
 
-- Installs Docker Engine and compose plugin when missing.
-- Ensures daemon is running (`ensure_docker_running`).
-- Grants docker group access to current Linux user (`ensure_docker_group_access`).
-
-### Source sync and startup
-
-- Clones or updates `~/odysseus` using `ODYSSEUS_REPO_REF`.
-- Applies `ODYSSEUS_REPO_SYNC_MODE` policy for existing workspaces:
-  - `managed-clean`: force-reset local branch/worktree to `origin/<ref>` (installer local default).
-  - `managed-ff`: fetch + fast-forward only, preserving local history constraints.
-  - `unmanaged`: skip git fetch/pull and reuse current local checkout as-is.
-- Starts containers with or without rebuild using `ODYSSEUS_REBUILD` and runtime compose args derived from `~/.odysseus/runtime.env`.
-- Polls local endpoint `http://127.0.0.1:7000` for readiness.
-
-### First-boot password handling
-
-On first boot:
-- Captures password-related log output to `~/.odysseus-initial-admin-password.txt`.
-- Uses fallback `tail -n 200` content when no password line is found.
-- Sets file mode to 600.
-- Prints the saved output and waits for explicit user confirmation before continuing.
+Compose invocation is built from runtime profile (`--env-file` plus resolved compose files).
 
 ---
 
 ## 4. Health Audit (`scripts/windows/Audit-Odysseus.ps1`)
 
-`Audit-Odysseus.ps1` is a read-only diagnostics tool. It reports PASS/WARN/FAIL across:
-- Ollama process/listener/HTTP health
-- WSL availability and Ubuntu distro detection
-- WSL routing and host gateway reachability
-- Runtime key presence in `~/.odysseus/runtime.env` (fallback to `~/odysseus/.env`)
-- Docker daemon and compose container status
-- Odysseus HTTP endpoint availability
-- Optional LAN exposure checks (`-CheckLanReachability`)
+Read-only audit reports PASS/WARN/FAIL across:
 
-The script resolves Ubuntu distro names dynamically, supporting `Ubuntu` and `Ubuntu-*` variants.
+- Ollama process/listener/HTTP
+- WSL and Ubuntu detection
+- WSL-to-host reachability
+- Runtime env keys
+- Docker daemon + compose services
+- Odysseus endpoint
 
-The audit and launcher now share runtime-check primitives through `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` for:
-- WSL command invocation and distro discovery
-- Ollama host candidate resolution and probe diagnostics
-- Runtime compose state parsing
-- Firewall rule state normalization (including access-denied signaling)
+Optional LAN checks remain available through `-CheckLanReachability`.
 
 ---
 
-## 5. Notes on Upstream GPU Overlay Paths
+## 5. Maintainer-Only Diagnostics
 
-Current installer automation uses `docker-compose.gpu-nvidia.yml` when NVIDIA support is detected. If upstream overlay conventions change, update both bootstrap behavior and docs together in the same release.
+The staged scripts in `tools/windows/diagnostics/` are maintainer/support tools and are not part of the normal end-user launch flow.
+
+---
+
+## 6. Maintainer Release Tooling
+
+- CI workflow: `.github/workflows/release-installer.yml`
+- Build/sign scripts: `tools/windows/*.ps1`
+
+These are maintainer-only and separate from end-user runtime behavior.

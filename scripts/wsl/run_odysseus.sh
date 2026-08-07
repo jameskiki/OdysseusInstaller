@@ -657,15 +657,15 @@ HOST_OVERRIDE_FILE="$RUNTIME_DIR/docker-compose.host-mode.override.yml"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-dev}
-ODYSSEUS_REPO_SYNC_MODE=${ODYSSEUS_REPO_SYNC_MODE:-managed-ff}
+ODYSSEUS_REPO_SYNC_MODE=${ODYSSEUS_REPO_SYNC_MODE:-managed-clean}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
 
 case "$ODYSSEUS_REPO_SYNC_MODE" in
     managed-clean|managed-ff|unmanaged)
         ;;
     *)
-        echo "[WARN] Unknown ODYSSEUS_REPO_SYNC_MODE='${ODYSSEUS_REPO_SYNC_MODE}'. Falling back to managed-ff."
-        ODYSSEUS_REPO_SYNC_MODE="managed-ff"
+        echo "[WARN] Unknown ODYSSEUS_REPO_SYNC_MODE='${ODYSSEUS_REPO_SYNC_MODE}'. Falling back to managed-clean."
+        ODYSSEUS_REPO_SYNC_MODE="managed-clean"
         ;;
 esac
 

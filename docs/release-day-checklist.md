@@ -17,9 +17,10 @@ Use this checklist when preparing and publishing a new installer version.
 - [ ] `OdysseusSetup-<version>.exe`
 - [ ] `OdysseusSetup-<version>.exe.sha256`
 - [ ] Run installer smoke test on a clean Windows machine/VM:
-- [ ] Local mode install path
+- [ ] Local install path
 - [ ] WSL readiness guidance path (if WSL/Ubuntu missing)
 - [ ] Launch script starts and reaches `http://localhost:7000` on prepared hosts
+- [ ] Health Audit shortcut runs and reports expected PASS/WARN output categories
 
 ## 3) Tag and publish release
 
@@ -40,9 +41,11 @@ Use this checklist when preparing and publishing a new installer version.
 
 - [ ] Fresh install test (local mode) from release asset.
 - [ ] Upgrade/repair path sanity check on a machine with prior install.
-- [ ] Remote mode shortcut opens `http://<host-ip>:7000` as expected.
-- [ ] Host mode firewall rule behavior validated.
-- [ ] Audit shortcut runs and reports expected PASS/WARN output categories.
+- [ ] Config override sanity checks:
+- [ ] `ODYSSEUS_REPO_REF`
+- [ ] `ODYSSEUS_REPO_SYNC_MODE`
+- [ ] `ODYSSEUS_REBUILD_MODE`
+- [ ] Optional host override path (`ODYSSEUS_WINDOWS_HOST_OVERRIDE`) validates as expected
 
 ## 6) Wrap-up
 
