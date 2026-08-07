@@ -14,8 +14,8 @@ Use this checklist when preparing and publishing a new installer version.
 - [ ] Wait for **Build and Release Installer** workflow run to pass.
 - [ ] Download CI artifact `odysseus-installer-<version>` from Actions.
 - [ ] Verify artifact includes:
-- [ ] `OdysseusSetup-<version>.exe`
-- [ ] `OdysseusSetup-<version>.exe.sha256`
+- [ ] `OdysseusSetup-<version>-<branch-slug>.exe` (non-tag CI builds)
+- [ ] `OdysseusSetup-<version>-<branch-slug>.exe.sha256` (non-tag CI builds)
 - [ ] Run installer smoke test on a clean Windows machine/VM:
 - [ ] Local install path
 - [ ] WSL readiness guidance path (if WSL/Ubuntu missing)
