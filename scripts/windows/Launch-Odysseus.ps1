@@ -17,6 +17,57 @@ catch {
     throw "Missing runtime checks module at '$RuntimeChecksModulePath'. Reinstall Odysseus to restore required launcher files."
 }
 
+function Get-LaunchExecutionContextInfo {
+    param([string]$ScriptRootPath)
+
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+    $installRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+        $installRoots += (Join-Path $programFiles 'Odysseus')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+        $installRoots += (Join-Path $programFilesX86 'Odysseus')
+    }
+
+    $normalizedRoot = [IO.Path]::GetFullPath($ScriptRootPath)
+    $context = 'ExternalCopy'
+    foreach ($installRoot in $installRoots) {
+        $normalizedInstall = [IO.Path]::GetFullPath($installRoot)
+        if ($normalizedRoot.StartsWith($normalizedInstall, [StringComparison]::OrdinalIgnoreCase)) {
+            $context = 'InstalledDefaultPath'
+            break
+        }
+    }
+
+    if ($context -eq 'ExternalCopy') {
+        $repoMarker = Join-Path $ScriptRootPath '..\..\installer\installer.iss'
+        if (Test-Path $repoMarker) {
+            $context = 'WorkspaceSource'
+        }
+    }
+
+    $launcherConfigPath = Join-Path $ScriptRootPath 'odysseus-launcher.config'
+    return [PSCustomObject]@{
+        Context = $context
+        ScriptRoot = $ScriptRootPath
+        LauncherConfigPath = $launcherConfigPath
+        LauncherConfigPresent = (Test-Path $launcherConfigPath)
+    }
+}
+
+function Write-LaunchExecutionContextBanner {
+    param([PSCustomObject]$ContextInfo)
+
+    Write-Host "Odysseus Launcher" -ForegroundColor Cyan
+    Write-Host ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) -ForegroundColor DarkGray
+    Write-Host ("Execution context: {0}" -f $ContextInfo.Context) -ForegroundColor DarkGray
+    Write-Host ("Script root: {0}" -f $ContextInfo.ScriptRoot) -ForegroundColor DarkGray
+    Write-Host ("Launcher config: {0}" -f $ContextInfo.LauncherConfigPath) -ForegroundColor DarkGray
+    Write-Host ("Launcher config present: {0}" -f $(if ($ContextInfo.LauncherConfigPresent) { 'yes' } else { 'no' })) -ForegroundColor DarkGray
+    Write-Host ''
+}
+
 # Capture a transcript of this launch to a per-user log for post-mortem debugging.
 $LogDir = Join-Path $env:LOCALAPPDATA 'Odysseus\Logs'
 try {
@@ -28,6 +79,9 @@ try {
 catch {
     # Transcript is best-effort; continue if it can't be started.
 }
+
+$ExecutionContextInfo = Get-LaunchExecutionContextInfo -ScriptRootPath $ScriptRoot
+Write-LaunchExecutionContextBanner -ContextInfo $ExecutionContextInfo
 
 $WslDistro = $null
 $BootstrapScript = Join-Path $ScriptRoot 'run_odysseus.sh'

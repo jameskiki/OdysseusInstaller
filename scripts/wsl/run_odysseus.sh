@@ -17,6 +17,47 @@ print_step() { echo -e "\n\e[1;36m[INTENT] $1\e[0m"; }
 print_ok()   { echo -e "\e[1;32m[SUCCESS] $1\e[0m"; }
 print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
 
+TARGET_DIR_DEFAULT="$HOME/odysseus"
+RUNTIME_DIR_DEFAULT="$HOME/.odysseus"
+RUNTIME_ENV_DEFAULT="$RUNTIME_DIR_DEFAULT/runtime.env"
+HOST_OVERRIDE_FILE_DEFAULT="$RUNTIME_DIR_DEFAULT/docker-compose.host-mode.override.yml"
+
+detect_bootstrap_execution_context() {
+    local script_path
+    local script_dir
+
+    script_path=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]:-$0}")
+    script_dir=$(dirname "$script_path")
+
+    BOOTSTRAP_SCRIPT_PATH="$script_path"
+    BOOTSTRAP_SCRIPT_DIR="$script_dir"
+    BOOTSTRAP_CONTEXT="ExternalCopy"
+
+    if [ -d "$TARGET_DIR_DEFAULT/.git" ] && [ "$script_path" = "$TARGET_DIR_DEFAULT/scripts/wsl/run_odysseus.sh" ]; then
+        BOOTSTRAP_CONTEXT="WorkspaceClone"
+        return 0
+    fi
+
+    if [[ "$script_path" == /mnt/* ]]; then
+        BOOTSTRAP_CONTEXT="WindowsMountedSource"
+        return 0
+    fi
+
+    if [[ "$script_path" == "$HOME"/* ]]; then
+        BOOTSTRAP_CONTEXT="LinuxHomeSource"
+    fi
+}
+
+print_bootstrap_execution_context() {
+    echo "[INFO] Bootstrap execution context: ${BOOTSTRAP_CONTEXT}"
+    echo "[INFO] Bootstrap script path: ${BOOTSTRAP_SCRIPT_PATH}"
+    echo "[INFO] Bootstrap script directory: ${BOOTSTRAP_SCRIPT_DIR}"
+    echo "[INFO] Runtime env target: ${RUNTIME_ENV_DEFAULT}"
+    echo "[INFO] Compose host-override target: ${HOST_OVERRIDE_FILE_DEFAULT}"
+    echo "[INFO] Host mode input: ${ODYSSEUS_HOST_MODE:-0}"
+    echo
+}
+
 handle_unexpected_error() {
     local exit_code="$1"
     local line_no="$2"
@@ -25,6 +66,9 @@ handle_unexpected_error() {
 }
 
 trap 'handle_unexpected_error $? $LINENO "$BASH_COMMAND"' ERR
+
+detect_bootstrap_execution_context
+print_bootstrap_execution_context
 
 run_with_progress() {
     local label="$1"
@@ -650,10 +694,10 @@ else
 fi
 
 print_step "Synchronizing the Odysseus project source workspace..."
-TARGET_DIR="$HOME/odysseus"
-RUNTIME_DIR="$HOME/.odysseus"
-RUNTIME_ENV="$RUNTIME_DIR/runtime.env"
-HOST_OVERRIDE_FILE="$RUNTIME_DIR/docker-compose.host-mode.override.yml"
+TARGET_DIR="$TARGET_DIR_DEFAULT"
+RUNTIME_DIR="$RUNTIME_DIR_DEFAULT"
+RUNTIME_ENV="$RUNTIME_ENV_DEFAULT"
+HOST_OVERRIDE_FILE="$HOST_OVERRIDE_FILE_DEFAULT"
 FIRST_BOOT=false
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-dev}
