@@ -850,16 +850,11 @@ if ($runConsistency) {
             }
 
             $hasHostModeOverride = $composeFiles | Where-Object { $_ -match 'docker-compose\.host-mode\.override\.yml$' } | Select-Object -First 1
-            if ($null -ne $hostModeIntent) {
-                if ($hostModeIntent -and -not $hasHostModeOverride) {
-                    Write-Check -Name 'Host mode parity (config vs COMPOSE_FILE)' -Status WARN -Detail 'Launcher intent is host mode ON, but COMPOSE_FILE has no host-mode override file.'
-                }
-                elseif ((-not $hostModeIntent) -and $hasHostModeOverride) {
-                    Write-Check -Name 'Host mode parity (config vs COMPOSE_FILE)' -Status WARN -Detail 'Launcher intent is host mode OFF, but COMPOSE_FILE includes host-mode override file.'
-                }
-                else {
-                    Write-Check -Name 'Host mode parity (config vs COMPOSE_FILE)' -Status PASS
-                }
+            if ($hasHostModeOverride) {
+                Write-Check -Name 'COMPOSE_FILE legacy host override usage' -Status WARN -Detail 'COMPOSE_FILE includes legacy docker-compose.host-mode.override.yml. APP_BIND in runtime.env now controls host binding; remove the legacy compose override entry to avoid conflicting port publications.'
+            }
+            else {
+                Write-Check -Name 'COMPOSE_FILE legacy host override usage' -Status PASS
             }
 
             if (-not [string]::IsNullOrWhiteSpace($bindHostIntent) -and -not [string]::IsNullOrWhiteSpace($runtimeBindHost) -and $bindHostIntent -ne $runtimeBindHost) {

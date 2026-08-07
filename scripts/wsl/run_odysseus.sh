@@ -20,7 +20,6 @@ print_fail() { echo -e "\e[1;31m[FAILED] $1\e[0m"; exit 1; }
 TARGET_DIR_DEFAULT="$HOME/odysseus"
 RUNTIME_DIR_DEFAULT="$HOME/.odysseus"
 RUNTIME_ENV_DEFAULT="$RUNTIME_DIR_DEFAULT/runtime.env"
-HOST_OVERRIDE_FILE_DEFAULT="$RUNTIME_DIR_DEFAULT/docker-compose.host-mode.override.yml"
 
 detect_bootstrap_execution_context() {
     local script_path
@@ -53,7 +52,6 @@ print_bootstrap_execution_context() {
     echo "[INFO] Bootstrap script path: ${BOOTSTRAP_SCRIPT_PATH}"
     echo "[INFO] Bootstrap script directory: ${BOOTSTRAP_SCRIPT_DIR}"
     echo "[INFO] Runtime env target: ${RUNTIME_ENV_DEFAULT}"
-    echo "[INFO] Compose host-override target: ${HOST_OVERRIDE_FILE_DEFAULT}"
     echo "[INFO] Deployment mode input: ${ODYSSEUS_DEPLOYMENT_MODE:-auto}"
     echo "[INFO] Host mode input: ${ODYSSEUS_HOST_MODE:-0}"
     echo "[INFO] App bind host input: ${ODYSSEUS_APP_BIND_HOST:-auto}"
@@ -509,7 +507,6 @@ compose_args_from_runtime() {
 configure_compose_files_runtime() {
     local env_file="$1"
     local target_dir="$2"
-    local host_override_path="$3"
     local compose_files="$target_dir/docker-compose.yml"
     local bind_host="${ODYSSEUS_APP_BIND_HOST:-}"
 
@@ -533,22 +530,10 @@ configure_compose_files_runtime() {
         print_fail "ODYSSEUS_APP_BIND_HOST='${bind_host}' is not supported with current compose port syntax. Use an IPv4 address or hostname without ':'."
     fi
 
-    if [ "$bind_host" != "127.0.0.1" ]; then
-        cat > "$host_override_path" <<'HOSTEOF'
-services:
-  odysseus:
-    ports:
-      - "__ODYSSEUS_BIND_HOST__:7000:7000"
-HOSTEOF
-        sed -i "s|__ODYSSEUS_BIND_HOST__|${bind_host}|g" "$host_override_path"
-        compose_files="${compose_files}:$host_override_path"
-    else
-        rm -f "$host_override_path"
-    fi
-
     export ODYSSEUS_APP_BIND_HOST="$bind_host"
     upsert_env_key "ODYSSEUS_DEPLOYMENT_MODE" "${ODYSSEUS_DEPLOYMENT_MODE:-local}" "$env_file"
     upsert_env_key "ODYSSEUS_APP_BIND_HOST" "$bind_host" "$env_file"
+    upsert_env_key "APP_BIND" "$bind_host" "$env_file"
     upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
 }
 
@@ -726,7 +711,6 @@ print_step "Synchronizing the Odysseus project source workspace..."
 TARGET_DIR="$TARGET_DIR_DEFAULT"
 RUNTIME_DIR="$RUNTIME_DIR_DEFAULT"
 RUNTIME_ENV="$RUNTIME_ENV_DEFAULT"
-HOST_OVERRIDE_FILE="$HOST_OVERRIDE_FILE_DEFAULT"
 FIRST_BOOT=false
 ODYSSEUS_DEPLOYMENT_MODE=${ODYSSEUS_DEPLOYMENT_MODE:-}
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
@@ -823,7 +807,7 @@ if [ ! -f "$RUNTIME_ENV" ]; then
 fi
 
 print_step "Applying host connectivity and compose profile settings..."
-configure_compose_files_runtime "$RUNTIME_ENV" "$TARGET_DIR" "$HOST_OVERRIDE_FILE"
+configure_compose_files_runtime "$RUNTIME_ENV" "$TARGET_DIR"
 configure_gateway_endpoints_runtime "$RUNTIME_ENV"
 print_ok "Environment endpoints and compose profiles aligned."
 echo "[INFO] Effective deployment mode: ${ODYSSEUS_DEPLOYMENT_MODE}"
