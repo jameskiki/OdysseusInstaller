@@ -54,7 +54,10 @@ print_bootstrap_execution_context() {
     echo "[INFO] Bootstrap script directory: ${BOOTSTRAP_SCRIPT_DIR}"
     echo "[INFO] Runtime env target: ${RUNTIME_ENV_DEFAULT}"
     echo "[INFO] Compose host-override target: ${HOST_OVERRIDE_FILE_DEFAULT}"
+    echo "[INFO] Deployment mode input: ${ODYSSEUS_DEPLOYMENT_MODE:-auto}"
     echo "[INFO] Host mode input: ${ODYSSEUS_HOST_MODE:-0}"
+    echo "[INFO] App bind host input: ${ODYSSEUS_APP_BIND_HOST:-auto}"
+    echo "[INFO] Ollama host override input: ${ODYSSEUS_OLLAMA_HOST:-unset}"
     echo
 }
 
@@ -286,6 +289,11 @@ resolve_windows_ollama_host() {
     ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED=""
     ODYSSEUS_OLLAMA_CANDIDATE_FAILURES=""
 
+    # Explicit ODYSSEUS_OLLAMA_HOST has the highest priority for hosted/remote setups.
+    if [ -n "${ODYSSEUS_OLLAMA_HOST:-}" ]; then
+        candidates+=("${ODYSSEUS_OLLAMA_HOST}")
+    fi
+
     # Allow advanced users to force a known-good host endpoint explicitly.
     if [ -n "${ODYSSEUS_WINDOWS_HOST_OVERRIDE:-}" ]; then
         candidates+=("${ODYSSEUS_WINDOWS_HOST_OVERRIDE}")
@@ -503,23 +511,44 @@ configure_compose_files_runtime() {
     local target_dir="$2"
     local host_override_path="$3"
     local compose_files="$target_dir/docker-compose.yml"
+    local bind_host="${ODYSSEUS_APP_BIND_HOST:-}"
 
     if command -v nvidia-smi > /dev/null 2>&1; then
         compose_files="${compose_files}:$target_dir/docker-compose.gpu-nvidia.yml"
     fi
 
-    if [ "${ODYSSEUS_HOST_MODE:-0}" = "1" ]; then
+    if [ -z "$bind_host" ]; then
+        if [ "${ODYSSEUS_DEPLOYMENT_MODE:-local}" = "lan-host" ]; then
+            bind_host="0.0.0.0"
+        else
+            bind_host="127.0.0.1"
+        fi
+    fi
+
+    if [ "$bind_host" = "localhost" ]; then
+        bind_host="127.0.0.1"
+    fi
+
+    if [[ "$bind_host" == *:* ]]; then
+        print_fail "ODYSSEUS_APP_BIND_HOST='${bind_host}' is not supported with current compose port syntax. Use an IPv4 address or hostname without ':'."
+    fi
+
+    if [ "$bind_host" != "127.0.0.1" ]; then
         cat > "$host_override_path" <<'HOSTEOF'
 services:
   odysseus:
     ports:
-      - "0.0.0.0:7000:7000"
+      - "__ODYSSEUS_BIND_HOST__:7000:7000"
 HOSTEOF
+        sed -i "s|__ODYSSEUS_BIND_HOST__|${bind_host}|g" "$host_override_path"
         compose_files="${compose_files}:$host_override_path"
     else
         rm -f "$host_override_path"
     fi
 
+    export ODYSSEUS_APP_BIND_HOST="$bind_host"
+    upsert_env_key "ODYSSEUS_DEPLOYMENT_MODE" "${ODYSSEUS_DEPLOYMENT_MODE:-local}" "$env_file"
+    upsert_env_key "ODYSSEUS_APP_BIND_HOST" "$bind_host" "$env_file"
     upsert_env_key "COMPOSE_FILE" "$compose_files" "$env_file"
 }
 
@@ -528,7 +557,7 @@ configure_gateway_endpoints_runtime() {
     local gateway_host
 
     if ! resolve_windows_ollama_host; then
-        print_fail "Unable to resolve a reachable Windows host endpoint for Ollama. Candidates: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}. Probe results: ${ODYSSEUS_OLLAMA_CANDIDATE_FAILURES:-none}. Verify Windows Ollama binding/firewall or set ODYSSEUS_WINDOWS_HOST_OVERRIDE, then rerun."
+        print_fail "Unable to resolve a reachable Windows host endpoint for Ollama. Candidates: ${ODYSSEUS_OLLAMA_CANDIDATES_ATTEMPTED:-none}. Probe results: ${ODYSSEUS_OLLAMA_CANDIDATE_FAILURES:-none}. Verify Windows Ollama binding/firewall or set ODYSSEUS_OLLAMA_HOST/ODYSSEUS_WINDOWS_HOST_OVERRIDE, then rerun."
         return 1
     fi
 
@@ -699,10 +728,41 @@ RUNTIME_DIR="$RUNTIME_DIR_DEFAULT"
 RUNTIME_ENV="$RUNTIME_ENV_DEFAULT"
 HOST_OVERRIDE_FILE="$HOST_OVERRIDE_FILE_DEFAULT"
 FIRST_BOOT=false
+ODYSSEUS_DEPLOYMENT_MODE=${ODYSSEUS_DEPLOYMENT_MODE:-}
 ODYSSEUS_HOST_MODE=${ODYSSEUS_HOST_MODE:-0}
 ODYSSEUS_REPO_REF=${ODYSSEUS_REPO_REF:-dev}
 ODYSSEUS_REPO_SYNC_MODE=${ODYSSEUS_REPO_SYNC_MODE:-managed-clean}
 ODYSSEUS_REBUILD=${ODYSSEUS_REBUILD:-1}
+
+if [ -z "$ODYSSEUS_DEPLOYMENT_MODE" ]; then
+    if [ "$ODYSSEUS_HOST_MODE" = "1" ]; then
+        ODYSSEUS_DEPLOYMENT_MODE="lan-host"
+    else
+        ODYSSEUS_DEPLOYMENT_MODE="local"
+    fi
+fi
+
+case "$ODYSSEUS_DEPLOYMENT_MODE" in
+    local|lan-host)
+        ;;
+    *)
+        echo "[WARN] Unknown ODYSSEUS_DEPLOYMENT_MODE='${ODYSSEUS_DEPLOYMENT_MODE}'. Falling back from ODYSSEUS_HOST_MODE."
+        if [ "$ODYSSEUS_HOST_MODE" = "1" ]; then
+            ODYSSEUS_DEPLOYMENT_MODE="lan-host"
+        else
+            ODYSSEUS_DEPLOYMENT_MODE="local"
+        fi
+        ;;
+esac
+
+if [ "$ODYSSEUS_DEPLOYMENT_MODE" = "lan-host" ]; then
+    ODYSSEUS_HOST_MODE=1
+else
+    ODYSSEUS_HOST_MODE=0
+fi
+
+export ODYSSEUS_DEPLOYMENT_MODE
+export ODYSSEUS_HOST_MODE
 
 case "$ODYSSEUS_REPO_SYNC_MODE" in
     managed-clean|managed-ff|unmanaged)
@@ -766,6 +826,8 @@ print_step "Applying host connectivity and compose profile settings..."
 configure_compose_files_runtime "$RUNTIME_ENV" "$TARGET_DIR" "$HOST_OVERRIDE_FILE"
 configure_gateway_endpoints_runtime "$RUNTIME_ENV"
 print_ok "Environment endpoints and compose profiles aligned."
+echo "[INFO] Effective deployment mode: ${ODYSSEUS_DEPLOYMENT_MODE}"
+echo "[INFO] Effective Odysseus app bind host: ${ODYSSEUS_APP_BIND_HOST}"
 
 print_step "Auditing Windows-hosted Ollama reachability from WSL..."
 audit_ollama_gateway "$ODYSSEUS_WINDOWS_GATEWAY_IP"
@@ -821,6 +883,9 @@ until curl -sS --connect-timeout 2 --max-time 4 -f http://127.0.0.1:7000 > /dev/
 done
 echo ""
 print_ok "Application socket online after ${COUNT}s."
+if [ "$ODYSSEUS_APP_BIND_HOST" != "127.0.0.1" ]; then
+    echo "[INFO] Odysseus is published for client access on ${ODYSSEUS_APP_BIND_HOST}:7000 (subject to Windows firewall/network rules)."
+fi
 
 if [ "$FIRST_BOOT" = true ]; then
     password_log="$HOME/.odysseus-initial-admin-password.txt"

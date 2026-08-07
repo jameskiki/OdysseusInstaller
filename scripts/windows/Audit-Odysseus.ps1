@@ -127,7 +127,7 @@ function Get-LauncherConfigMap {
     return Get-KeyValueMapFromLines -Lines (Get-Content -Path $configPath -ErrorAction SilentlyContinue)
 }
 
-function Try-GetUriInfo {
+function Resolve-UriInfo {
     param([string]$Value)
 
     if ([string]::IsNullOrWhiteSpace($Value)) {
@@ -227,17 +227,17 @@ function Get-ListenerProcessLabel {
         return 'n/a'
     }
 
-    $pid = $Listener.OwningProcess
-    if ($null -eq $pid -or $pid -le 0) {
+    $processId = $Listener.OwningProcess
+    if ($null -eq $processId -or $processId -le 0) {
         return 'n/a'
     }
 
     try {
-        $proc = Get-Process -Id $pid -ErrorAction Stop
-        return ('{0} ({1})' -f $proc.ProcessName, $pid)
+        $proc = Get-Process -Id $processId -ErrorAction Stop
+        return ('{0} ({1})' -f $proc.ProcessName, $processId)
     }
     catch {
-        return ('pid {0}' -f $pid)
+        return ('pid {0}' -f $processId)
     }
 }
 
@@ -252,10 +252,10 @@ function Get-ComposeServiceLogTail {
         return $null
     }
 
-    $args = ('logs --tail {0} {1}' -f $Tail, $Service)
-    $result = Invoke-OdysseusWslComposeCaptured -WslDistro $script:WslDistro -ComposeArgs $args
+    $logArgs = ('logs --tail {0} {1}' -f $Tail, $Service)
+    $result = Invoke-OdysseusWslComposeCaptured -WslDistro $script:WslDistro -ComposeArgs $logArgs
     if ($result.ExitCode -ne 0) {
-        $result = Invoke-OdysseusWslComposeCaptured -WslDistro $script:WslDistro -ComposeArgs $args -UseSudo
+        $result = Invoke-OdysseusWslComposeCaptured -WslDistro $script:WslDistro -ComposeArgs $logArgs -UseSudo
     }
     if ($result.ExitCode -ne 0) {
         return $null
@@ -417,6 +417,15 @@ if ($script:HasWsl) {
 $launcherConfig = Get-LauncherConfigMap
 $runtimeEnvLines = Get-RuntimeEnvLines
 $runtimeEnvMap = Get-KeyValueMapFromLines -Lines $runtimeEnvLines
+$script:OllamaHostOverride = if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_OLLAMA_HOST)) {
+    $env:ODYSSEUS_OLLAMA_HOST
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
+    $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE
+}
+else {
+    ''
+}
 
 if ([string]::IsNullOrWhiteSpace($CheckProfile)) {
     if (Test-CanPrompt) {
@@ -548,7 +557,7 @@ if ($runWsl) {
             else {
                 Write-Check -Name 'WSL host gateway' -Status PASS -Detail ("{0} (from '{1}')" -f $gatewayIp, $defaultRoute)
 
-                $reach = Test-OdysseusWslOllamaReachability -WslDistro $script:WslDistro -HostOverride $env:ODYSSEUS_WINDOWS_HOST_OVERRIDE -TimeoutSec 5
+                $reach = Test-OdysseusWslOllamaReachability -WslDistro $script:WslDistro -HostOverride $script:OllamaHostOverride -TimeoutSec 5
                 if ($reach.Success) {
                     Write-Check -Name 'Ollama reachable from WSL' -Status PASS -Detail ("Reachable via {0}" -f $reach.ReachableVia)
                 }
@@ -673,6 +682,8 @@ if ($runConsistency) {
     Write-Section '6) Consistency checks (WARN-only)'
 
     $hostModeIntent = $null
+    $deploymentModeIntent = $null
+    $bindHostIntent = ''
     if ($launcherConfig.Count -eq 0) {
         $missingReason = if ($script:ExecutionContextInfo.Context -eq 'WorkspaceSource') {
             'This is expected when running from the source workspace (installer seeds this file only in the installed app folder).'
@@ -684,12 +695,53 @@ if ($runConsistency) {
     }
     else {
         Write-Check -Name 'Launcher config present' -Status PASS
+        if ($launcherConfig.ContainsKey('ODYSSEUS_DEPLOYMENT_MODE') -and $launcherConfig['ODYSSEUS_DEPLOYMENT_MODE'] -match '^(local|lan-host)$') {
+            $deploymentModeIntent = $launcherConfig['ODYSSEUS_DEPLOYMENT_MODE'].ToLowerInvariant()
+            Write-Check -Name 'Launcher key ODYSSEUS_DEPLOYMENT_MODE' -Status PASS -Detail ("Configured value: {0}" -f $deploymentModeIntent)
+        }
+        else {
+            Write-Check -Name 'Launcher key ODYSSEUS_DEPLOYMENT_MODE' -Status WARN -Detail 'Missing or unparseable. Expected one of: local, lan-host.'
+        }
+
         if ($launcherConfig.ContainsKey('ODYSSEUS_HOST_MODE') -and $launcherConfig['ODYSSEUS_HOST_MODE'] -match '^(1|true|yes|0|false|no)$') {
             $hostModeIntent = ($launcherConfig['ODYSSEUS_HOST_MODE'] -match '^(1|true|yes)$')
             Write-Check -Name 'Launcher key ODYSSEUS_HOST_MODE' -Status PASS -Detail ("Configured value: {0}" -f $launcherConfig['ODYSSEUS_HOST_MODE'])
         }
         else {
             Write-Check -Name 'Launcher key ODYSSEUS_HOST_MODE' -Status WARN -Detail 'Missing or unparseable. Expected one of: 1, true, yes, 0, false, no.'
+        }
+
+        if ($launcherConfig.ContainsKey('ODYSSEUS_OPEN_BROWSER') -and $launcherConfig['ODYSSEUS_OPEN_BROWSER'] -match '^(1|true|yes|0|false|no)$') {
+            Write-Check -Name 'Launcher key ODYSSEUS_OPEN_BROWSER' -Status PASS -Detail ("Configured value: {0}" -f $launcherConfig['ODYSSEUS_OPEN_BROWSER'])
+        }
+        else {
+            Write-Check -Name 'Launcher key ODYSSEUS_OPEN_BROWSER' -Status WARN -Detail 'Missing or unparseable. Expected one of: 1, true, yes, 0, false, no.'
+        }
+
+        if ($launcherConfig.ContainsKey('ODYSSEUS_APP_BIND_HOST') -and -not [string]::IsNullOrWhiteSpace($launcherConfig['ODYSSEUS_APP_BIND_HOST'])) {
+            $bindHostIntent = $launcherConfig['ODYSSEUS_APP_BIND_HOST'].Trim()
+            if ($bindHostIntent -eq 'localhost') { $bindHostIntent = '127.0.0.1' }
+            Write-Check -Name 'Launcher key ODYSSEUS_APP_BIND_HOST' -Status PASS -Detail ("Configured value: {0}" -f $bindHostIntent)
+        }
+        else {
+            Write-Check -Name 'Launcher key ODYSSEUS_APP_BIND_HOST' -Status WARN -Detail 'Missing or empty. Expected loopback (127.0.0.1) or explicit LAN bind host.'
+        }
+
+        if ($launcherConfig.ContainsKey('ODYSSEUS_OLLAMA_HOST') -and -not [string]::IsNullOrWhiteSpace($launcherConfig['ODYSSEUS_OLLAMA_HOST'])) {
+            Write-Check -Name 'Launcher key ODYSSEUS_OLLAMA_HOST' -Status PASS -Detail ("Configured value: {0}" -f $launcherConfig['ODYSSEUS_OLLAMA_HOST'])
+        }
+        else {
+            Write-Check -Name 'Launcher key ODYSSEUS_OLLAMA_HOST' -Status WARN -Detail 'Not set. Auto-discovery/ODYSSEUS_WINDOWS_HOST_OVERRIDE will be used.'
+        }
+
+        if ($null -ne $deploymentModeIntent -and $null -ne $hostModeIntent) {
+            $hostModeFromDeployment = ($deploymentModeIntent -eq 'lan-host')
+            if ($hostModeFromDeployment -ne $hostModeIntent) {
+                Write-Check -Name 'Deployment mode parity (ODYSSEUS_DEPLOYMENT_MODE vs ODYSSEUS_HOST_MODE)' -Status WARN -Detail ("Deployment mode '{0}' implies host mode={1}, but ODYSSEUS_HOST_MODE is {2}." -f $deploymentModeIntent, $hostModeFromDeployment, $hostModeIntent)
+            }
+            else {
+                Write-Check -Name 'Deployment mode parity (ODYSSEUS_DEPLOYMENT_MODE vs ODYSSEUS_HOST_MODE)' -Status PASS
+            }
         }
     }
 
@@ -704,6 +756,8 @@ if ($runConsistency) {
         $ollamaBaseUrl = if ($runtimeEnvMap.ContainsKey('OLLAMA_BASE_URL')) { $runtimeEnvMap['OLLAMA_BASE_URL'] } else { '' }
         $embeddingUrl = if ($runtimeEnvMap.ContainsKey('EMBEDDING_URL')) { $runtimeEnvMap['EMBEDDING_URL'] } else { '' }
         $composeFile = if ($runtimeEnvMap.ContainsKey('COMPOSE_FILE')) { $runtimeEnvMap['COMPOSE_FILE'] } else { '' }
+        $runtimeDeploymentMode = if ($runtimeEnvMap.ContainsKey('ODYSSEUS_DEPLOYMENT_MODE')) { $runtimeEnvMap['ODYSSEUS_DEPLOYMENT_MODE'] } else { '' }
+        $runtimeBindHost = if ($runtimeEnvMap.ContainsKey('ODYSSEUS_APP_BIND_HOST')) { $runtimeEnvMap['ODYSSEUS_APP_BIND_HOST'] } else { '' }
 
         if ([string]::IsNullOrWhiteSpace($llmHost) -or [string]::IsNullOrWhiteSpace($llmHosts)) {
             Write-Check -Name 'LLM host pair consistency' -Status WARN -Detail 'LLM_HOST and/or LLM_HOSTS missing.'
@@ -715,7 +769,7 @@ if ($runConsistency) {
             Write-Check -Name 'LLM host pair consistency' -Status PASS -Detail ("Host: {0}" -f $llmHost)
         }
 
-        $ollamaUriInfo = Try-GetUriInfo -Value $ollamaBaseUrl
+        $ollamaUriInfo = Resolve-UriInfo -Value $ollamaBaseUrl
         if ($null -eq $ollamaUriInfo) {
             Write-Check -Name 'OLLAMA_BASE_URL format' -Status WARN -Detail 'Value missing or not a valid URI.'
         }
@@ -735,7 +789,7 @@ if ($runConsistency) {
             }
         }
 
-        $embeddingUriInfo = Try-GetUriInfo -Value $embeddingUrl
+        $embeddingUriInfo = Resolve-UriInfo -Value $embeddingUrl
         if ($null -eq $embeddingUriInfo) {
             Write-Check -Name 'EMBEDDING_URL format' -Status WARN -Detail 'Value missing or not a valid URI.'
         }
@@ -778,6 +832,23 @@ if ($runConsistency) {
                 }
             }
 
+            if ([string]::IsNullOrWhiteSpace($runtimeBindHost)) {
+                Write-Check -Name 'Runtime key ODYSSEUS_APP_BIND_HOST' -Status WARN -Detail 'Key is missing.'
+            }
+            else {
+                Write-Check -Name 'Runtime key ODYSSEUS_APP_BIND_HOST' -Status PASS -Detail ("Value: {0}" -f $runtimeBindHost)
+            }
+
+            if ([string]::IsNullOrWhiteSpace($runtimeDeploymentMode)) {
+                Write-Check -Name 'Runtime key ODYSSEUS_DEPLOYMENT_MODE' -Status WARN -Detail 'Key is missing.'
+            }
+            elseif ($runtimeDeploymentMode -notmatch '^(local|lan-host)$') {
+                Write-Check -Name 'Runtime key ODYSSEUS_DEPLOYMENT_MODE' -Status WARN -Detail ("Unparseable value: {0}" -f $runtimeDeploymentMode)
+            }
+            else {
+                Write-Check -Name 'Runtime key ODYSSEUS_DEPLOYMENT_MODE' -Status PASS -Detail ("Value: {0}" -f $runtimeDeploymentMode)
+            }
+
             $hasHostModeOverride = $composeFiles | Where-Object { $_ -match 'docker-compose\.host-mode\.override\.yml$' } | Select-Object -First 1
             if ($null -ne $hostModeIntent) {
                 if ($hostModeIntent -and -not $hasHostModeOverride) {
@@ -790,11 +861,28 @@ if ($runConsistency) {
                     Write-Check -Name 'Host mode parity (config vs COMPOSE_FILE)' -Status PASS
                 }
             }
+
+            if (-not [string]::IsNullOrWhiteSpace($bindHostIntent) -and -not [string]::IsNullOrWhiteSpace($runtimeBindHost) -and $bindHostIntent -ne $runtimeBindHost) {
+                Write-Check -Name 'Bind host parity (launcher vs runtime.env)' -Status WARN -Detail ("Launcher value '{0}' does not match runtime.env value '{1}'." -f $bindHostIntent, $runtimeBindHost)
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($bindHostIntent) -and -not [string]::IsNullOrWhiteSpace($runtimeBindHost)) {
+                Write-Check -Name 'Bind host parity (launcher vs runtime.env)' -Status PASS
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($runtimeDeploymentMode) -and $runtimeDeploymentMode -match '^(local|lan-host)$' -and $null -ne $deploymentModeIntent) {
+                if ($runtimeDeploymentMode -ne $deploymentModeIntent) {
+                    Write-Check -Name 'Deployment mode parity (launcher vs runtime.env)' -Status WARN -Detail ("Launcher mode '{0}' differs from runtime.env mode '{1}'." -f $deploymentModeIntent, $runtimeDeploymentMode)
+                }
+                else {
+                    Write-Check -Name 'Deployment mode parity (launcher vs runtime.env)' -Status PASS
+                }
+            }
         }
 
         $listen7000Consistency = Get-NetTCPConnection -LocalPort 7000 -State Listen -ErrorAction SilentlyContinue
         $lanBindConsistency = $listen7000Consistency | Where-Object { $_.LocalAddress -in @('::', '0.0.0.0') }
         $loopBindConsistency = $listen7000Consistency | Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') }
+        $specificBindConsistency = $listen7000Consistency | Where-Object { $_.LocalAddress -notin @('::', '0.0.0.0', '127.0.0.1', '::1') }
         if ($null -ne $hostModeIntent) {
             if ($hostModeIntent -and $loopBindConsistency) {
                 Write-Check -Name 'Host mode parity (config vs port 7000 bind)' -Status WARN -Detail 'Host mode is ON but listener appears loopback-only.'
@@ -807,6 +895,37 @@ if ($runConsistency) {
             }
             else {
                 Write-Check -Name 'Host mode parity (config vs port 7000 bind)' -Status WARN -Detail 'No active listener on port 7000; parity cannot be fully confirmed.'
+            }
+        }
+
+        $expectedBindHost = ''
+        if (-not [string]::IsNullOrWhiteSpace($bindHostIntent)) {
+            $expectedBindHost = $bindHostIntent
+        }
+        elseif ($null -ne $deploymentModeIntent) {
+            $expectedBindHost = if ($deploymentModeIntent -eq 'lan-host') { '0.0.0.0' } else { '127.0.0.1' }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($expectedBindHost)) {
+            if ($expectedBindHost -eq '127.0.0.1') {
+                if ($lanBindConsistency -or $specificBindConsistency) {
+                    Write-Check -Name 'Bind host parity (intent vs port 7000 bind)' -Status WARN -Detail 'Intent is loopback-only, but listener appears exposed beyond loopback.'
+                }
+                elseif ($loopBindConsistency) {
+                    Write-Check -Name 'Bind host parity (intent vs port 7000 bind)' -Status PASS
+                }
+            }
+            else {
+                $matchingSpecific = $listen7000Consistency | Where-Object { $_.LocalAddress -eq $expectedBindHost }
+                if (-not $listen7000Consistency) {
+                    Write-Check -Name 'Bind host parity (intent vs port 7000 bind)' -Status WARN -Detail 'No active listener on port 7000; parity cannot be confirmed.'
+                }
+                elseif (-not $lanBindConsistency -and -not $matchingSpecific) {
+                    Write-Check -Name 'Bind host parity (intent vs port 7000 bind)' -Status WARN -Detail ("Listener is not bound to intended host '{0}' (and no wildcard bind detected)." -f $expectedBindHost)
+                }
+                else {
+                    Write-Check -Name 'Bind host parity (intent vs port 7000 bind)' -Status PASS
+                }
             }
         }
     }
@@ -891,7 +1010,7 @@ if ($runConsistency) {
     $ollamaBaseUrlValue = if ($runtimeEnvMap.ContainsKey('OLLAMA_BASE_URL')) { $runtimeEnvMap['OLLAMA_BASE_URL'] } else { '' }
     $embeddingUrlValue = if ($runtimeEnvMap.ContainsKey('EMBEDDING_URL')) { $runtimeEnvMap['EMBEDDING_URL'] } else { '' }
 
-    $ollamaTarget = Try-GetUriInfo -Value $ollamaBaseUrlValue
+    $ollamaTarget = Resolve-UriInfo -Value $ollamaBaseUrlValue
     if ($null -eq $ollamaTarget) {
         Add-TargetRow -Rows $targetRows -Level 'WARN' -Consumer 'odysseus.llm' -TargetHost 'n/a' -Port 'n/a' -Path 'n/a' -Source 'runtime.env' -Note 'OLLAMA_BASE_URL missing or invalid.'
     }
@@ -900,7 +1019,7 @@ if ($runConsistency) {
         Add-TargetRow -Rows $targetRows -Level 'INFO' -Consumer 'odysseus.llm' -TargetHost $ollamaTarget.Host -Port $llmTargetPort -Path $ollamaTarget.Path -Source 'runtime.env' -Note 'Runtime target'
     }
 
-    $embeddingTarget = Try-GetUriInfo -Value $embeddingUrlValue
+    $embeddingTarget = Resolve-UriInfo -Value $embeddingUrlValue
     if ($null -eq $embeddingTarget) {
         Add-TargetRow -Rows $targetRows -Level 'WARN' -Consumer 'odysseus.embedding' -TargetHost 'n/a' -Port 'n/a' -Path 'n/a' -Source 'runtime.env' -Note 'EMBEDDING_URL missing or invalid.'
     }

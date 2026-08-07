@@ -100,10 +100,132 @@ if (Test-Path $LauncherConfigFile) {
     }
 }
 
-$IsHostMode = ($LauncherConfig['ODYSSEUS_HOST_MODE'] -match '^(1|true|yes)$')
-$IsTestMode = $TestMode -or ($LauncherConfig['ODYSSEUS_TEST_MODE'] -match '^(1|true|yes)$') -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
+function Test-TruthyValue {
+    param([string]$Value)
+    return (($Value -as [string]) -match '^(1|true|yes)$')
+}
+
+function Test-FalsyValue {
+    param([string]$Value)
+    return (($Value -as [string]) -match '^(0|false|no)$')
+}
+
+function Resolve-PrimaryWindowsIpv4 {
+    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -eq 'Alive' -and $_.NextHop -ne '0.0.0.0' } |
+        Sort-Object RouteMetric, InterfaceMetric |
+        Select-Object -First 1
+
+    if ($null -eq $route) {
+        return $null
+    }
+
+    $candidate = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notmatch '^127\.' -and $_.IPAddress -notmatch '^169\.254\.' -and $_.PrefixOrigin -ne 'WellKnown' } |
+        Sort-Object SkipAsSource |
+        Select-Object -First 1
+
+    if ($null -eq $candidate) {
+        return $null
+    }
+
+    return $candidate.IPAddress
+}
+
+$deploymentModeSource = $null
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_DEPLOYMENT_MODE)) {
+    $deploymentModeSource = $env:ODYSSEUS_DEPLOYMENT_MODE.Trim().ToLowerInvariant()
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_DEPLOYMENT_MODE'])) {
+    $deploymentModeSource = $LauncherConfig['ODYSSEUS_DEPLOYMENT_MODE'].Trim().ToLowerInvariant()
+}
+
+$legacyHostModeSource = if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_HOST_MODE)) {
+    $env:ODYSSEUS_HOST_MODE
+}
+else {
+    $LauncherConfig['ODYSSEUS_HOST_MODE']
+}
+$legacyHostModeEnabled = (Test-TruthyValue -Value $legacyHostModeSource)
+
+$DeploymentMode = $null
+switch ($deploymentModeSource) {
+    'local' { $DeploymentMode = 'local' }
+    'lan-host' { $DeploymentMode = 'lan-host' }
+    default {
+        if (-not [string]::IsNullOrWhiteSpace($deploymentModeSource)) {
+            Write-Host "[WARN] ODYSSEUS_DEPLOYMENT_MODE value '$deploymentModeSource' is not supported. Expected 'local' or 'lan-host'. Falling back to ODYSSEUS_HOST_MODE." -ForegroundColor Yellow
+        }
+    }
+}
+
+if ($null -eq $DeploymentMode) {
+    $DeploymentMode = if ($legacyHostModeEnabled) { 'lan-host' } else { 'local' }
+}
+
+$IsHostMode = ($DeploymentMode -eq 'lan-host')
+if (-not [string]::IsNullOrWhiteSpace($deploymentModeSource) -and -not [string]::IsNullOrWhiteSpace($legacyHostModeSource)) {
+    if ($IsHostMode -ne $legacyHostModeEnabled) {
+        Write-Host "[WARN] ODYSSEUS_DEPLOYMENT_MODE ('$DeploymentMode') overrides ODYSSEUS_HOST_MODE ('$legacyHostModeSource')." -ForegroundColor Yellow
+    }
+}
+
+$IsTestMode = $TestMode -or (Test-TruthyValue -Value $LauncherConfig['ODYSSEUS_TEST_MODE']) -or (Test-TruthyValue -Value $env:ODYSSEUS_TEST_MODE)
+$env:ODYSSEUS_DEPLOYMENT_MODE = $DeploymentMode
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
 $env:ODYSSEUS_TEST_MODE = if ($IsTestMode) { '1' } else { '0' }
+
+$appBindHost = if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_APP_BIND_HOST)) {
+    $env:ODYSSEUS_APP_BIND_HOST.Trim()
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_APP_BIND_HOST'])) {
+    $LauncherConfig['ODYSSEUS_APP_BIND_HOST'].Trim()
+}
+elseif ($IsHostMode) {
+    '0.0.0.0'
+}
+else {
+    '127.0.0.1'
+}
+
+if ($appBindHost -eq 'localhost') {
+    $appBindHost = '127.0.0.1'
+}
+$env:ODYSSEUS_APP_BIND_HOST = $appBindHost
+
+if ([string]::IsNullOrWhiteSpace($env:ODYSSEUS_OLLAMA_HOST) -and -not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_OLLAMA_HOST'])) {
+    $env:ODYSSEUS_OLLAMA_HOST = $LauncherConfig['ODYSSEUS_OLLAMA_HOST'].Trim()
+}
+
+$OpenBrowser = $true
+$openBrowserSource = $null
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_OPEN_BROWSER)) {
+    $openBrowserSource = $env:ODYSSEUS_OPEN_BROWSER
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_OPEN_BROWSER'])) {
+    $openBrowserSource = $LauncherConfig['ODYSSEUS_OPEN_BROWSER']
+}
+
+if ($null -ne $openBrowserSource) {
+    if (Test-TruthyValue -Value $openBrowserSource) {
+        $OpenBrowser = $true
+    }
+    elseif (Test-FalsyValue -Value $openBrowserSource) {
+        $OpenBrowser = $false
+    }
+    else {
+        Write-Host "[WARN] ODYSSEUS_OPEN_BROWSER value '$openBrowserSource' is not parseable. Expected one of: 1, true, yes, 0, false, no. Using default: open browser." -ForegroundColor Yellow
+    }
+}
+
+$OdysseusLocalUrl = 'http://127.0.0.1:7000'
+$OdysseusClientUrl = $OdysseusLocalUrl
+if ($IsHostMode) {
+    $lanIp = Resolve-PrimaryWindowsIpv4
+    if (-not [string]::IsNullOrWhiteSpace($lanIp)) {
+        $OdysseusClientUrl = "http://$lanIp:7000"
+    }
+}
 $repoRef = 'dev'
 if (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_REPO_REF'])) {
     $repoRef = $LauncherConfig['ODYSSEUS_REPO_REF']
@@ -148,14 +270,18 @@ switch ($rebuildMode) {
 }
 
 if ($IsHostMode) {
-    Write-Host "[WARN] ODYSSEUS_HOST_MODE is enabled via configuration. This may expose Odysseus beyond localhost based on runtime compose settings." -ForegroundColor Yellow
+    Write-Host "[WARN] Deployment mode is '$DeploymentMode'. This may expose Odysseus beyond localhost based on runtime compose settings." -ForegroundColor Yellow
 }
 
 if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
     Write-Host "[INFO] Using explicit Windows host override for WSL Ollama reachability: $($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)" -ForegroundColor DarkGray
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_OLLAMA_HOST)) {
+    Write-Host "[INFO] Using explicit Ollama host override for WSL reachability: $($env:ODYSSEUS_OLLAMA_HOST)" -ForegroundColor DarkGray
+}
+
+$wslEnvVars = @('ODYSSEUS_DEPLOYMENT_MODE', 'ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_OLLAMA_HOST', 'ODYSSEUS_APP_BIND_HOST', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -473,6 +599,37 @@ function Confirm-OllamaFirewallBridge {
     }
 }
 
+function Confirm-OdysseusHostFirewallRule {
+    param(
+        [bool]$HostModeEnabled,
+        [string]$BindHost
+    )
+
+    if (-not $HostModeEnabled -or $BindHost -eq '127.0.0.1') {
+        Write-Host "[INFO] Port 7000 firewall host rule not required for loopback-only mode." -ForegroundColor DarkGray
+        return
+    }
+
+    $ruleName = 'Odysseus AI Network Host'
+    $status = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
+    if ($status.Status -eq 'Enabled') {
+        Write-Host "[INFO] Firewall rule '$ruleName' is already enabled for client access on port 7000." -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host "[INFO] Configuring firewall rule '$ruleName' for inbound TCP 7000 (Private profile)." -ForegroundColor DarkGray
+    & netsh.exe advfirewall firewall delete rule name="$ruleName" 1>$null 2>$null
+    & netsh.exe advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=7000 profile=private 1>$null 2>$null
+
+    $updated = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
+    if ($updated.Status -eq 'Enabled') {
+        Write-Host "[INFO] Firewall rule '$ruleName' is enabled." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "[WARN] Could not verify firewall rule '$ruleName' after configuration attempt. $($updated.Detail)" -ForegroundColor Yellow
+    }
+}
+
 function Invoke-WslCommand {
     param([string]$Command)
 
@@ -565,8 +722,8 @@ function Test-OdysseusRuntimeHealth {
         }
     }
 
-    if (-not (Test-HttpEndpoint -Uri 'http://localhost:7000' -TimeoutSec 3)) {
-        $issues.Add('Odysseus app endpoint is down (http://localhost:7000).')
+    if (-not (Test-HttpEndpoint -Uri $OdysseusLocalUrl -TimeoutSec 3)) {
+        $issues.Add(("Odysseus app endpoint is down ({0})." -f $OdysseusLocalUrl))
     }
 
     return [PSCustomObject]@{
@@ -699,12 +856,21 @@ Invoke-Step `
             Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
         }
         Write-Host "[INFO] Installer default is local-only. Advanced overrides are config-driven." -ForegroundColor DarkGray
+        Write-Host "[INFO] Deployment mode: $DeploymentMode" -ForegroundColor DarkGray
         Write-Host "[INFO] Repo sync mode: $repoSyncMode" -ForegroundColor DarkGray
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }
         else {
             Write-Host "[INFO] This launch will skip container rebuilds." -ForegroundColor Yellow
+        }
+        Write-Host "[INFO] App bind host target: $env:ODYSSEUS_APP_BIND_HOST" -ForegroundColor DarkGray
+        Write-Host "[INFO] Host-local endpoint check URL: $OdysseusLocalUrl" -ForegroundColor DarkGray
+        if ($IsHostMode) {
+            Write-Host "[INFO] Client access URL (same LAN): $OdysseusClientUrl" -ForegroundColor DarkGray
+        }
+        if (-not $OpenBrowser) {
+            Write-Host "[INFO] Browser auto-open is disabled for this launch." -ForegroundColor DarkGray
         }
     }
 
@@ -814,12 +980,18 @@ Invoke-Step `
     }
 
 Invoke-Step `
+    -Intent "Ensuring Windows firewall permissions for client browser access on port 7000..." `
+    -Action {
+        Confirm-OdysseusHostFirewallRule -HostModeEnabled:$IsHostMode -BindHost $env:ODYSSEUS_APP_BIND_HOST
+    }
+
+Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
     -Action {
         $reachable = $false
         for ($i = 0; $i -lt 6; $i++) {
             try {
-                Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+                Invoke-WebRequest -Uri $OdysseusLocalUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
                 $reachable = $true
                 break
             }
@@ -828,13 +1000,30 @@ Invoke-Step `
             }
         }
         if (-not $reachable) {
-            throw "Odysseus did not become reachable on http://localhost:7000."
+            throw ("Odysseus did not become reachable on {0}." -f $OdysseusLocalUrl)
+        }
+
+        Write-Host "[INFO] Odysseus is reachable at host-local URL: $OdysseusLocalUrl" -ForegroundColor DarkGray
+        if ($IsHostMode) {
+            Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
         }
     }
 
-Invoke-Step `
-    -Intent "Opening the Odysseus web interface in the default browser..." `
-    -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop }
+if ($OpenBrowser) {
+    Invoke-Step `
+        -Intent "Opening the Odysseus web interface in the default browser..." `
+        -Action { Start-Process $OdysseusLocalUrl -ErrorAction Stop }
+}
+else {
+    Invoke-Step `
+        -Intent "Skipping browser auto-open and leaving endpoint details in this terminal..." `
+        -Action {
+            Write-Host "[INFO] Browser launch skipped. Open this URL from the host machine: $OdysseusLocalUrl" -ForegroundColor DarkGray
+            if ($IsHostMode) {
+                Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+            }
+        }
+}
 
 Invoke-Step `
     -Intent "Starting live health watchdog (auto-heal light, 10s interval) while this window stays open..." `
