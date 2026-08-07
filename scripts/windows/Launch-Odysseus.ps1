@@ -223,7 +223,10 @@ $OdysseusClientUrl = $OdysseusLocalUrl
 if ($IsHostMode) {
     $lanIp = Resolve-PrimaryWindowsIpv4
     if (-not [string]::IsNullOrWhiteSpace($lanIp)) {
-        $OdysseusClientUrl = "http://$lanIp:7000"
+        $OdysseusClientUrl = "http://${lanIp}:7000"
+    }
+    else {
+        Write-Host "[WARN] Host mode is enabled, but no primary Windows LAN IPv4 could be resolved. Client LAN URL is unavailable; host-local URL remains $OdysseusLocalUrl." -ForegroundColor Yellow
     }
 }
 $repoRef = 'dev'
@@ -869,6 +872,9 @@ Invoke-Step `
         if ($IsHostMode) {
             Write-Host "[INFO] Client access URL (same LAN): $OdysseusClientUrl" -ForegroundColor DarkGray
         }
+        else {
+            Write-Host "[INFO] Client LAN access is disabled in local mode. To allow client devices, set ODYSSEUS_DEPLOYMENT_MODE=lan-host (or ODYSSEUS_HOST_MODE=1) and relaunch." -ForegroundColor DarkGray
+        }
         if (-not $OpenBrowser) {
             Write-Host "[INFO] Browser auto-open is disabled for this launch." -ForegroundColor DarkGray
         }
@@ -1007,6 +1013,9 @@ Invoke-Step `
         if ($IsHostMode) {
             Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
         }
+        else {
+            Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
+        }
     }
 
 if ($OpenBrowser) {
@@ -1021,6 +1030,9 @@ else {
             Write-Host "[INFO] Browser launch skipped. Open this URL from the host machine: $OdysseusLocalUrl" -ForegroundColor DarkGray
             if ($IsHostMode) {
                 Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
             }
         }
 }
