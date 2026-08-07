@@ -82,6 +82,33 @@ Advanced users can edit this config to override runtime behavior without install
 
 If launch fails during Ollama reachability checks, run the **Odysseus Health Audit** shortcut. The audit reports which WSL host candidates were tested for Ollama in priority order: explicit override, Windows default-route IPv4, WSL resolver nameserver, WSL default gateway, and `host.docker.internal`.
 
+By default, the audit now prompts you to choose a profile:
+
+- `Quick` - host + WSL + endpoint checks
+- `Network` - `Quick` plus LAN exposure checks
+- `Containers` - runtime env + container + endpoint checks
+- `Consistency` - launcher intent vs runtime mapping consistency checks
+- `Full` - all checks
+
+For non-interactive runs (CI/support scripts), select a profile explicitly:
+
+```powershell
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\Audit-Odysseus.ps1 -CheckProfile Full
+```
+
+`Full` and `Consistency` include an informational endpoint summary table with:
+
+- IPv4 bind/listen rows
+- Host process ownership for Windows listeners
+- Container published/internal ports plus health/uptime
+- Runtime dependency targets from `runtime.env`
+
+Optional deep-dive hints for unhealthy/down compose services:
+
+```powershell
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\windows\Audit-Odysseus.ps1 -CheckProfile Full -IncludeFailureLogHints
+```
+
 ---
 
 ## Further Reading

@@ -163,7 +163,25 @@ Read-only audit reports PASS/WARN/FAIL across:
 - Docker daemon + compose services
 - Odysseus endpoint
 
-Optional LAN checks remain available through `-CheckLanReachability`.
+The audit is profile-driven and prompts the user to select a profile when run interactively:
+
+- `Quick`
+- `Network`
+- `Containers`
+- `Consistency`
+- `Full`
+
+For non-interactive invocations, pass `-CheckProfile` explicitly to avoid prompts.
+
+Consistency profile checks are WARN-only and focus on launcher intent vs runtime mapping parity (host mode intent, runtime endpoint keys, and compose file references).
+
+`Full` and `Consistency` also print an informational service endpoint summary with IPv4 listener/bind mappings, Windows listener process ownership, compose published/internal ports, and runtime dependency targets.
+
+Optional switch for extra troubleshooting detail:
+
+- `-IncludeFailureLogHints`: adds last compose log lines for services that are not running or unhealthy (informational only).
+
+Legacy `-CheckLanReachability` remains supported for compatibility and enables LAN checks even when the selected profile would otherwise skip them.
 
 ---
 
