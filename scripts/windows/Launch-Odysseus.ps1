@@ -35,7 +35,7 @@ if (-not (Test-Path $BootstrapScript)) {
     $BootstrapScript = Join-Path $ScriptRoot '..\wsl\run_odysseus.sh'
 }
 
-# Single key=value config written by the installer (replaces the former per-key marker files).
+# Single key=value config written by the installer. Advanced users can override runtime behavior here.
 $LauncherConfigFile = Join-Path $ScriptRoot 'odysseus-launcher.config'
 $LauncherConfig = @{}
 if (Test-Path $LauncherConfigFile) {
@@ -91,6 +91,14 @@ switch ($rebuildMode) {
             $env:ODYSSEUS_REBUILD = if ($choice -match '^(y|yes)$') { '1' } else { '0' }
         }
     }
+}
+
+if ($IsHostMode) {
+    Write-Host "[WARN] ODYSSEUS_HOST_MODE is enabled via configuration. This may expose Odysseus beyond localhost based on runtime compose settings." -ForegroundColor Yellow
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
+    Write-Host "[INFO] Using explicit Windows host override for WSL Ollama reachability: $($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)" -ForegroundColor DarkGray
 }
 
 $wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
@@ -631,11 +639,12 @@ function Invoke-Step {
 }
 
 Invoke-Step `
-    -Intent "Applying local runtime preferences (branch/ref '$repoRef', sync mode '$repoSyncMode', rebuild mode '$rebuildMode')..." `
+    -Intent "Applying local-first runtime preferences from launcher config (repo ref '$repoRef', sync mode '$repoSyncMode', rebuild mode '$rebuildMode')..." `
     -Action {
         if ($IsTestMode) {
             Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
         }
+        Write-Host "[INFO] Installer default is local-only. Advanced overrides are config-driven." -ForegroundColor DarkGray
         Write-Host "[INFO] Repo sync mode: $repoSyncMode" -ForegroundColor DarkGray
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
