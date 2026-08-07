@@ -21,7 +21,7 @@ param (
 $ErrorActionPreference = 'SilentlyContinue'
 
 $ScriptRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $PSScriptRoot }
-$RuntimeChecksModulePath = Join-Path $ScriptRoot '..\lib\Odysseus.RuntimeChecks.psm1'
+$RuntimeChecksModulePath = Join-Path $ScriptRoot '..\..\..\scripts\windows\lib\Odysseus.RuntimeChecks.psm1'
 if (-not (Test-Path $RuntimeChecksModulePath)) {
     throw "Missing runtime checks module at '$RuntimeChecksModulePath'."
 }

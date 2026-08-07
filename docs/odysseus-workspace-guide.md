@@ -87,7 +87,6 @@ The installer does not expose advanced runtime options in wizard pages. Use `ody
 - `ODYSSEUS_REPO_REF`
 - `ODYSSEUS_REPO_SYNC_MODE`
 - `ODYSSEUS_REBUILD_MODE`
-- `ODYSSEUS_HOST_MODE`
 - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
 
 Recommended approach:

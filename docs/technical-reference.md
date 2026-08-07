@@ -14,7 +14,7 @@ This document describes current local-installer pipeline and runtime behavior.
 | `scripts/wsl/run_odysseus.sh` | Linux bootstrap script executed in WSL Ubuntu |
 | `scripts/windows/Audit-Odysseus.ps1` | Read-only health audit script |
 | `scripts/windows/lib/Odysseus.RuntimeChecks.psm1` | Shared runtime checks used by launcher/audit/diagnostics |
-| `scripts/windows/diagnostics/` | Maintainer-only staged diagnostics scripts |
+| `tools/windows/diagnostics/` | Maintainer-only staged diagnostics scripts |
 | `tools/windows/` | Maintainer-only build/sign tooling |
 
 ---
@@ -169,7 +169,7 @@ Optional LAN checks remain available through `-CheckLanReachability`.
 
 ## 5. Maintainer-Only Diagnostics
 
-The staged scripts in `scripts/windows/diagnostics/` are maintainer/support tools and are not part of the normal end-user launch flow.
+The staged scripts in `tools/windows/diagnostics/` are maintainer/support tools and are not part of the normal end-user launch flow.
 
 ---
 

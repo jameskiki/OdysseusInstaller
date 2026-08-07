@@ -64,17 +64,13 @@ Default keys:
 - `ODYSSEUS_REPO_REF=dev`
 - `ODYSSEUS_REPO_SYNC_MODE=managed-clean`
 - `ODYSSEUS_REBUILD_MODE=ask`
-- `ODYSSEUS_HOST_MODE=0`
 
 Advanced users can edit this config to override runtime behavior without installer UI:
 
 - Repo/version source: `ODYSSEUS_REPO_REF`
 - Repo update strategy: `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`)
 - Rebuild behavior: `ODYSSEUS_REBUILD_MODE` (`ask|always|never`)
-- Optional host exposure mode: `ODYSSEUS_HOST_MODE=1`
 - Windows host endpoint override for WSL reachability: `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
-
-If you enable non-loopback exposure, verify your local firewall policy allows intended inbound traffic.
 
 ---
 

@@ -68,7 +68,7 @@ if ($IsTestMode) {
     $rebuildMode = 'never'
 }
 
-$repoSyncMode = 'managed-ff'
+$repoSyncMode = 'managed-clean'
 $rawRepoSyncMode = ($LauncherConfig['ODYSSEUS_REPO_SYNC_MODE'] -as [string])
 if ($rawRepoSyncMode) {
     $rawRepoSyncMode = $rawRepoSyncMode.ToLowerInvariant()

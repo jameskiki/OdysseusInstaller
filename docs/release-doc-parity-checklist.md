@@ -43,7 +43,7 @@ Use this checklist before creating or publishing a release tag.
 ## Support tooling parity
 
 - Verify `scripts/windows/Audit-Odysseus.ps1` is listed and documented.
-- Verify staged diagnostics scripts under `scripts/windows/diagnostics/` are labeled maintainer-only.
+- Verify staged diagnostics scripts under `tools/windows/diagnostics/` are labeled maintainer-only.
 - Verify audit docs mention runtime key checks from `~/.odysseus/runtime.env` with fallback to `~/odysseus/.env`.
 
 ## Documentation hygiene
