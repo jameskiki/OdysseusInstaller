@@ -22,6 +22,7 @@ SetupLogging=yes
 
 [Files]
 Source: "..\scripts\windows\Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\Update-Odysseus-NetworkingAdmin.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Prepare-WslForOdysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\wsl\run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation

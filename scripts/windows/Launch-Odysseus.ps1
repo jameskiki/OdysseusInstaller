@@ -754,6 +754,91 @@ function Configure-WslPortProxy {
     }
 }
 
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-WslPortProxyConfigured {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WindowsIpAddress) -or [string]::IsNullOrWhiteSpace($WslIpAddress)) {
+        return $false
+    }
+
+    try {
+        $rows = & netsh.exe interface portproxy show v4tov4 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+
+        $rawText = ($rows | ForEach-Object { $_.ToString().Trim() }) -join "`n"
+        $pattern = "(?im)^\s*$([regex]::Escape($WindowsIpAddress))\s+$Port\s+$([regex]::Escape($WslIpAddress))\s+$Port\s*$"
+        return [regex]::IsMatch($rawText, $pattern)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-OdysseusElevatedNetworkSetup {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000,
+        [switch]$EnsureHostFirewallRule
+    )
+
+    $helperScript = Join-Path $ScriptRoot 'Update-Odysseus-NetworkingAdmin.ps1'
+    if (-not (Test-Path $helperScript)) {
+        Write-Host "[WARN] Missing elevated networking helper script at '$helperScript'. Cannot request admin remediation automatically." -ForegroundColor Yellow
+        return $false
+    }
+
+    $argList = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$helperScript`"",
+        '-WindowsIpAddress', $WindowsIpAddress,
+        '-WslIpAddress', $WslIpAddress,
+        '-Port', $Port
+    )
+    if ($EnsureHostFirewallRule) {
+        $argList += '-EnsureHostFirewallRule'
+    }
+
+    try {
+        Write-Host "[INFO] Requesting elevation to configure Windows firewall/portproxy for LAN host mode..." -ForegroundColor Yellow
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -WindowStyle Normal -PassThru -Wait
+        if ($null -eq $proc) {
+            Write-Host "[WARN] Elevated network setup did not start. Remote LAN access may not work." -ForegroundColor Yellow
+            return $false
+        }
+
+        if ($proc.ExitCode -ne 0) {
+            Write-Host "[WARN] Elevated network setup exited with code $($proc.ExitCode). Remote LAN access may not work." -ForegroundColor Yellow
+            return $false
+        }
+
+        Write-Host "[INFO] Elevated network setup completed successfully." -ForegroundColor DarkGray
+        return $true
+    }
+    catch {
+        Write-Host "[WARN] Elevated network setup was not completed ($($_.Exception.Message)). Remote LAN access may not work." -ForegroundColor Yellow
+        return $false
+    }
+}
+
 function Invoke-WslCommand {
     param([string]$Command)
 
@@ -1107,18 +1192,42 @@ Invoke-Step `
     }
 
 Invoke-Step `
-    -Intent "Ensuring Windows firewall permissions for client browser access on port 7000..." `
-    -Action {
-        Confirm-OdysseusHostFirewallRule -HostModeEnabled:$IsHostMode -BindHost $env:ODYSSEUS_APP_BIND_HOST
-    }
-
-Invoke-Step `
     -Intent "Configuring WSL port forwarding for remote LAN access..." `
     -Action {
         if ($IsHostMode -and $env:ODYSSEUS_APP_BIND_HOST -ne '127.0.0.1') {
             $wslIp = Resolve-WslIpAddress
             if ($wslIp) {
-                Configure-WslPortProxy -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000
+                $firewallRuleName = 'Odysseus AI Network Host'
+                $firewallStatus = Get-OdysseusFirewallRuleStatus -DisplayName $firewallRuleName
+                $firewallNeedsFix = ($firewallStatus.Status -ne 'Enabled')
+
+                $portProxyNeedsFix = -not (Test-WslPortProxyConfigured -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000)
+
+                if (-not ($firewallNeedsFix -or $portProxyNeedsFix)) {
+                    Write-Host "[INFO] Host networking prerequisites already satisfy LAN host mode (firewall + portproxy)." -ForegroundColor DarkGray
+                    return
+                }
+
+                if (Test-IsAdministrator) {
+                    Write-Host "[INFO] Launcher is elevated. Applying required host networking changes directly." -ForegroundColor DarkGray
+                    if ($firewallNeedsFix) {
+                        Confirm-OdysseusHostFirewallRule -HostModeEnabled:$IsHostMode -BindHost $env:ODYSSEUS_APP_BIND_HOST
+                    }
+                    if ($portProxyNeedsFix) {
+                        Configure-WslPortProxy -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000
+                    }
+                }
+                else {
+                    $elevatedOk = Invoke-OdysseusElevatedNetworkSetup `
+                        -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST `
+                        -WslIpAddress $wslIp `
+                        -Port 7000 `
+                        -EnsureHostFirewallRule:$firewallNeedsFix
+
+                    if (-not $elevatedOk) {
+                        Write-Host "[WARN] Host networking could not be fully updated without elevation. Host-local access should still work, but LAN clients may fail until networking is remediated." -ForegroundColor Yellow
+                    }
+                }
             }
             else {
                 Write-Host "[WARN] Could not configure WSL port proxy: WSL IP address could not be determined. Remote LAN access may not work." -ForegroundColor Yellow
