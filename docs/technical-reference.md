@@ -37,6 +37,7 @@ There is no internet/shared-instance wizard mode and no branch-selection page.
 Setup copies:
 
 - `Launch-Odysseus.ps1`
+- `Update-Odysseus-NetworkingAdmin.ps1`
 - `Prepare-WslForOdysseus.ps1`
 - `run_odysseus.sh`
 - `Audit-Odysseus.ps1`
@@ -92,6 +93,8 @@ Installer performs readiness checks only:
 Installer configures inbound TCP `11434` rule (`Odysseus Ollama WSL Bridge`) for WSL-to-Windows Ollama traffic.
 
 Launcher additionally ensures inbound TCP `7000` rule (`Odysseus AI Network Host`, Private profile) when host mode is enabled with non-loopback bind host.
+
+If LAN host mode also needs a Windows `portproxy` update for WSL-to-LAN forwarding and the launcher is not already elevated, it prompts for elevation and runs `Update-Odysseus-NetworkingAdmin.ps1` to apply the required host networking changes.
 
 ---
 
