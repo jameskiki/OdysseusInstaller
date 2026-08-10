@@ -111,6 +111,7 @@ function Test-FalsyValue {
 }
 
 function Resolve-PrimaryWindowsIpv4 {
+    # Get the primary route
     $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
         Where-Object { $_.State -eq 'Alive' -and $_.NextHop -ne '0.0.0.0' } |
         Sort-Object RouteMetric, InterfaceMetric |
@@ -120,8 +121,34 @@ function Resolve-PrimaryWindowsIpv4 {
         return $null
     }
 
+    # Get the network interface for this route
+    $interface = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+    
+    # Skip virtual adapters (WSL, Hyper-V, etc)
+    if ($interface -and $interface.Virtual -eq $true) {
+        # Try to find an alternate non-virtual interface with a valid IP
+        $altRoute = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Alive' -and $_.NextHop -ne '0.0.0.0' } |
+            Sort-Object RouteMetric, InterfaceMetric
+        
+        foreach ($alt in $altRoute) {
+            $altInterface = Get-NetAdapter -InterfaceIndex $alt.InterfaceIndex -ErrorAction SilentlyContinue
+            if ($altInterface -and $altInterface.Virtual -ne $true) {
+                $route = $alt
+                break
+            }
+        }
+    }
+
+    # Get candidate IPs from the selected interface
+    # Exclude: loopback (127.x), link-local APIPA (169.254.x), and Hyper-V/WSL virtual adapters (172.29.x, 172.30.x, 172.31.x)
     $candidate = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notmatch '^127\.' -and $_.IPAddress -notmatch '^169\.254\.' -and $_.PrefixOrigin -ne 'WellKnown' } |
+        Where-Object { 
+            $_.IPAddress -notmatch '^127\.' `
+            -and $_.IPAddress -notmatch '^169\.254\.' `
+            -and $_.IPAddress -notmatch '^172\.(29|30|31)\.' `
+            -and $_.PrefixOrigin -ne 'WellKnown' 
+        } |
         Sort-Object SkipAsSource |
         Select-Object -First 1
 
@@ -222,11 +249,12 @@ $OdysseusLocalUrl = 'http://127.0.0.1:7000'
 $OdysseusClientUrl = $OdysseusLocalUrl
 if ($IsHostMode) {
     $lanIp = Resolve-PrimaryWindowsIpv4
-    if (-not [string]::IsNullOrWhiteSpace($lanIp)) {
+    if ($lanIp) {
         $OdysseusClientUrl = "http://${lanIp}:7000"
+        Write-Host "[DEBUG] Resolved primary Windows LAN IPv4: $lanIp" -ForegroundColor DarkGray
     }
     else {
-        Write-Host "[WARN] Host mode is enabled, but no primary Windows LAN IPv4 could be resolved. Client LAN URL is unavailable; host-local URL remains $OdysseusLocalUrl." -ForegroundColor Yellow
+        Write-Host "[WARN] Host mode is enabled, but no primary Windows LAN IPv4 could be resolved (no route found or no valid interface IP). Client LAN URL is unavailable; host-local URL remains $OdysseusLocalUrl. Try running 'ipconfig /all' in PowerShell to diagnose network configuration." -ForegroundColor Yellow
     }
 }
 $repoRef = 'dev'
@@ -621,15 +649,108 @@ function Confirm-OdysseusHostFirewallRule {
     }
 
     Write-Host "[INFO] Configuring firewall rule '$ruleName' for inbound TCP 7000 (Private profile)." -ForegroundColor DarkGray
-    & netsh.exe advfirewall firewall delete rule name="$ruleName" 1>$null 2>$null
-    & netsh.exe advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=7000 profile=private 1>$null 2>$null
-
-    $updated = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
-    if ($updated.Status -eq 'Enabled') {
-        Write-Host "[INFO] Firewall rule '$ruleName' is enabled." -ForegroundColor DarkGray
+    
+    try {
+        & netsh.exe advfirewall firewall delete rule name="$ruleName" dir=in 2>&1 | Out-Null
+        & netsh.exe advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=7000 profile=private enable=yes 2>&1 | Out-Null
+        
+        # Wait briefly for rule to be written
+        Start-Sleep -Milliseconds 500
+        
+        # Retry the verification up to 3 times
+        $verifyAttempts = 0
+        $maxAttempts = 3
+        while ($verifyAttempts -lt $maxAttempts) {
+            $updated = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName -ErrorAction SilentlyContinue
+            if ($updated.Status -eq 'Enabled') {
+                Write-Host "[INFO] Firewall rule '$ruleName' is enabled." -ForegroundColor DarkGray
+                return
+            }
+            $verifyAttempts++
+            if ($verifyAttempts -lt $maxAttempts) {
+                Start-Sleep -Milliseconds 300
+            }
+        }
+        
+        # If we get here, verification failed after retries
+        Write-Host "[WARN] Could not verify firewall rule '$ruleName' after configuration attempt. The netsh command completed, but the rule could not be found by Get-NetFirewallRule. Attempting manual verification..." -ForegroundColor Yellow
+        
+        # Try alternative verification via netsh query
+        $queryResult = & netsh.exe advfirewall firewall show rule name="$ruleName" 2>&1
+        if ($queryResult -match 'enabled') {
+            Write-Host "[INFO] Firewall rule '$ruleName' verified via netsh (may require firewall policy refresh). You may need to restart the service or disable/re-enable the rule." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "[WARN] Firewall rule '$ruleName' could not be verified. If client connectivity fails, check Windows Defender Firewall settings manually and ensure inbound TCP port 7000 is allowed for Private networks." -ForegroundColor Yellow
+        }
     }
-    else {
-        Write-Host "[WARN] Could not verify firewall rule '$ruleName' after configuration attempt. $($updated.Detail)" -ForegroundColor Yellow
+    catch {
+        Write-Host "[WARN] Error while configuring firewall rule '$ruleName': $_. You may need to configure the rule manually in Windows Defender Firewall (inbound, Private profile, TCP port 7000)." -ForegroundColor Yellow
+    }
+}
+
+function Resolve-WslIpAddress {
+    try {
+        $wslOutput = & wsl hostname -I 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[WARN] WSL command failed: $wslOutput" -ForegroundColor Yellow
+            return $null
+        }
+        
+        $ips = $wslOutput.Trim().Split() | Where-Object { $_ }
+        if ($ips.Count -gt 0) {
+            return $ips[0]
+        }
+        return $null
+    }
+    catch {
+        Write-Host "[WARN] Could not resolve WSL IP address: $_" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Configure-WslPortProxy {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WindowsIpAddress) -or [string]::IsNullOrWhiteSpace($WslIpAddress)) {
+        Write-Host "[WARN] Cannot configure WSL port proxy: missing IP addresses." -ForegroundColor Yellow
+        return
+    }
+
+    # Check if already configured
+    try {
+        $existing = & netsh.exe interface portproxy show v4tov4 2>&1 | Select-String "listenport=$Port"
+        if ($existing) {
+            Write-Host "[INFO] WSL port proxy for port $Port is already configured." -ForegroundColor DarkGray
+            return
+        }
+    }
+    catch {
+        # Continue if query fails
+    }
+
+    Write-Host "[INFO] Configuring WSL port proxy: Windows ${WindowsIpAddress}:${Port} -> WSL ${WslIpAddress}:${Port}" -ForegroundColor DarkGray
+    
+    try {
+        # Remove any existing proxy for this port first
+        & netsh.exe interface portproxy delete v4tov4 listenport=$Port listenaddress=$WindowsIpAddress 2>&1 | Out-Null
+        
+        # Add the new port proxy
+        & netsh.exe interface portproxy add v4tov4 listenport=$Port listenaddress=$WindowsIpAddress connectport=$Port connectaddress=$WslIpAddress protocol=tcp 2>&1 | Out-Null
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[INFO] WSL port proxy configured successfully." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "[WARN] WSL port proxy configuration returned non-zero exit code. The proxy may not be functional." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "[WARN] Error while configuring WSL port proxy: $_. Remote clients may not be able to reach the app." -ForegroundColor Yellow
     }
 }
 
@@ -992,6 +1113,20 @@ Invoke-Step `
     }
 
 Invoke-Step `
+    -Intent "Configuring WSL port forwarding for remote LAN access..." `
+    -Action {
+        if ($IsHostMode -and $env:ODYSSEUS_APP_BIND_HOST -ne '127.0.0.1') {
+            $wslIp = Resolve-WslIpAddress
+            if ($wslIp) {
+                Configure-WslPortProxy -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000
+            }
+            else {
+                Write-Host "[WARN] Could not configure WSL port proxy: WSL IP address could not be determined. Remote LAN access may not work." -ForegroundColor Yellow
+            }
+        }
+    }
+
+Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
     -Action {
         $reachable = $false
@@ -1011,7 +1146,12 @@ Invoke-Step `
 
         Write-Host "[INFO] Odysseus is reachable at host-local URL: $OdysseusLocalUrl" -ForegroundColor DarkGray
         if ($IsHostMode) {
-            Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+            if ($OdysseusClientUrl -ne $OdysseusLocalUrl) {
+                Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host "[WARN] Client LAN URL could not be determined. Verify your network configuration and check the launcher log for diagnostic details. Use 'ipconfig /all' to find your Windows machine IP address and access http://<your-ip>:7000." -ForegroundColor Yellow
+            }
         }
         else {
             Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
@@ -1029,7 +1169,12 @@ else {
         -Action {
             Write-Host "[INFO] Browser launch skipped. Open this URL from the host machine: $OdysseusLocalUrl" -ForegroundColor DarkGray
             if ($IsHostMode) {
-                Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+                if ($OdysseusClientUrl -ne $OdysseusLocalUrl) {
+                    Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+                }
+                else {
+                    Write-Host "[WARN] Client LAN URL could not be determined. Verify your network configuration and check the launcher log for diagnostic details. Use 'ipconfig /all' to find your Windows machine IP address and access http://<your-ip>:7000." -ForegroundColor Yellow
+                }
             }
             else {
                 Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
