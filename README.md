@@ -1,6 +1,6 @@
 # OdysseusInstaller
 
-OdysseusInstaller is a Windows wizard that installs and launches a local Odysseus AI Workspace instance on your machine.
+OdysseusInstaller is a Windows wizard that installs and launches an Odysseus AI Workspace instance on your machine, with optional LAN hosting for browser clients on the same network.
 
 ---
 
@@ -36,12 +36,17 @@ Download the latest Windows installer from the [Releases](../../releases) page.
 Double-click the downloaded installer and follow the wizard.
 
 - Accept the licence agreement.
-- Review local preflight summary in the Ready page.
+- Choose deployment mode:
+	- Local mode (loopback-only)
+	- LAN Host mode (network browser access)
+- Review the preflight summary in the Ready page.
 - Click **Install**.
 
 **3. Launch Odysseus**
 
-Use the **Launch Odysseus (Local)** shortcut on your desktop. A terminal window opens, performs setup checks, runs bootstrap in WSL, and opens your browser at `http://localhost:7000`.
+Use the **Launch Odysseus** shortcut on your desktop. A terminal window opens, performs setup checks, runs bootstrap in WSL, and opens your browser.
+
+When LAN Host mode is selected during install, the launcher also prints a client-access URL for other machines on the same network.
 
 > **First time only:** the terminal displays generated admin credential output before browser launch.
 
@@ -57,9 +62,16 @@ The launcher also enables the same preflight-only mode when `ODYSSEUS_TEST_MODE=
 
 ## Advanced Overrides (Config-Only)
 
-The installer seeds defaults into `{app}\odysseus-launcher.config`.
+The installer seeds mode-specific defaults into `{app}\odysseus-launcher.config`.
 
-Default keys:
+Default keys by selected installer mode:
+
+| Installer mode | ODYSSEUS_DEPLOYMENT_MODE | ODYSSEUS_HOST_MODE | ODYSSEUS_APP_BIND_HOST | ODYSSEUS_OPEN_BROWSER |
+|---|---|---|---|---|
+| Local | `local` | `0` | `127.0.0.1` | `1` |
+| LAN Host | `lan-host` | `1` | `0.0.0.0` | `1` |
+
+Other seeded defaults are shared across both modes:
 
 - `ODYSSEUS_REPO_REF=dev`
 - `ODYSSEUS_REPO_SYNC_MODE=managed-clean`
@@ -67,10 +79,15 @@ Default keys:
 
 Advanced users can edit this config to override runtime behavior without installer UI:
 
+- Deployment mode: `ODYSSEUS_DEPLOYMENT_MODE` (`local|lan-host`)
 - Repo/version source: `ODYSSEUS_REPO_REF`
 - Repo update strategy: `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`)
 - Rebuild behavior: `ODYSSEUS_REBUILD_MODE` (`ask|always|never`)
+- Legacy app exposure mode: `ODYSSEUS_HOST_MODE` (`0|1`) (fallback when `ODYSSEUS_DEPLOYMENT_MODE` is not set)
+- Browser auto-open behavior: `ODYSSEUS_OPEN_BROWSER` (`1|0`)
+- App bind host for port 7000 publish: `ODYSSEUS_APP_BIND_HOST` (default `127.0.0.1`)
 - Windows host endpoint override for WSL reachability: `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- Explicit Ollama host override for WSL reachability: `ODYSSEUS_OLLAMA_HOST`
 
 ---
 
@@ -78,7 +95,22 @@ Advanced users can edit this config to override runtime behavior without install
 
 | Scenario | URL |
 |---|---|
-| Local machine | `http://localhost:7000` |
+| Local machine | `http://127.0.0.1:7000` |
+| Same-LAN client (host mode enabled) | `http://<host-ip>:7000` |
+
+LAN host mode quick-start:
+
+1. Set `ODYSSEUS_DEPLOYMENT_MODE=lan-host` in `odysseus-launcher.config`.
+2. Set `ODYSSEUS_APP_BIND_HOST=0.0.0.0` (or a specific host IP) in `odysseus-launcher.config`.
+3. Optional for headless hosts: set `ODYSSEUS_OPEN_BROWSER=0`.
+4. Launch Odysseus and use the client URL printed by the launcher.
+5. The launcher attempts to ensure Windows Firewall has an inbound private-profile rule for TCP 7000 (`Odysseus AI Network Host`).
+
+Important: LAN Host mode is intended for trusted private networks only. TLS/auth hardening is not enabled by default in this release.
+
+Recommended modern setting for LAN mode:
+
+- Prefer `ODYSSEUS_DEPLOYMENT_MODE=lan-host` and keep `ODYSSEUS_HOST_MODE` only for backward compatibility.
 
 If launch fails during Ollama reachability checks, run the **Odysseus Health Audit** shortcut. The audit reports which WSL host candidates were tested for Ollama in priority order: explicit override, Windows default-route IPv4, WSL resolver nameserver, WSL default gateway, and `host.docker.internal`.
 

@@ -33,10 +33,26 @@ jobs:
           $refName = "${{ github.ref_name }}"
           $runNumber = "${{ github.run_number }}"
           $manualVersion = "${{ github.event.inputs.version }}"
+          $branchSlug = ([regex]::Replace($refName.ToLowerInvariant(), '[^0-9a-z]+', '-')).Trim('-')
+          if ([string]::IsNullOrWhiteSpace($branchSlug)) {
+            $branchSlug = "ci"
+          }
 
           $isRelease = $false
           $version = $null
           $releaseTag = ''
+
+          $issPath = Join-Path $PWD 'installer\installer.iss'
+          $issContent = Get-Content -Path $issPath -Raw
+          $appVersionMatch = [regex]::Match($issContent, '(?m)^AppVersion=(.+)$')
+          if (-not $appVersionMatch.Success) {
+            throw "Could not find AppVersion=... in installer.iss"
+          }
+          $baseVersion = $appVersionMatch.Groups[1].Value.Trim()
+
+          if ($baseVersion -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z\.]+)?$') {
+            throw "Base AppVersion '$baseVersion' in installer.iss is invalid."
+          }
 
           if (($refType -eq 'tag') -and $refName.StartsWith('v')) {
             $isRelease = $true
@@ -47,16 +63,14 @@ jobs:
             $version = $manualVersion
           }
           else {
-            # CI-only builds get a deterministic prerelease version.
-            $version = "0.0.0-ci.$runNumber"
+            # Branch CI builds inherit the repo AppVersion and add deterministic prerelease metadata.
+            $version = "$baseVersion-ci.$runNumber"
           }
 
           if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z\.]+)?$') {
             throw "Version '$version' is invalid. Expected <major>.<minor>.<patch> with optional suffix (example: 1.2.3-rc.1)."
           }
 
-          $issPath = Join-Path $PWD 'installer\installer.iss'
-          $issContent = Get-Content -Path $issPath -Raw
           $updatedContent = [regex]::Replace($issContent, '(?m)^AppVersion=.*$', "AppVersion=$version")
           if ($updatedContent -eq $issContent) {
             throw "Could not find AppVersion=... in installer.iss"
@@ -66,6 +80,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "is_release=$($isRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "branch_slug=$branchSlug" >> $env:GITHUB_OUTPUT
 
       - name: Compile Inno Setup script
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
@@ -77,6 +92,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.meta.outputs.version }}"
+          $isRelease = "${{ steps.meta.outputs.is_release }}" -eq "true"
+          $branchSlug = "${{ steps.meta.outputs.branch_slug }}"
 
           $searchRoots = @("Output", "installer/Output")
           $builtExe = Get-ChildItem -Path $searchRoots -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue |
@@ -87,7 +104,12 @@ jobs:
             throw "No installer executable found. Checked: $checkedRoots"
           }
 
-          $releaseExe = "OdysseusSetup-$version.exe"
+          if ($isRelease) {
+            $releaseExe = "OdysseusSetup-$version.exe"
+          }
+          else {
+            $releaseExe = "OdysseusSetup-$version-$branchSlug.exe"
+          }
           $releaseExePath = Join-Path $PWD $releaseExe
           Copy-Item -Path $builtExe.FullName -Destination $releaseExePath -Force
 
@@ -106,7 +128,7 @@ jobs:
         if: steps.meta.outputs.is_release != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: odysseus-installer-${{ steps.vars.outputs.version }}
+          name: odysseus-installer-${{ steps.vars.outputs.version }}-${{ steps.meta.outputs.branch_slug }}
           path: |
             ${{ steps.vars.outputs.release_exe }}
             ${{ steps.vars.outputs.release_sha }}

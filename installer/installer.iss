@@ -1,14 +1,14 @@
 [Setup]
 AppName=Odysseus AI Environment
-AppVersion=1.0.0
+AppVersion=0.2.0
 AppPublisher=Odysseus Team
 AppPublisherURL=https://github.com/pewdiepie-archdaemon/odysseus
 AppSupportURL=https://github.com/pewdiepie-archdaemon/odysseus/issues
 VersionInfoCompany=Odysseus Team
 VersionInfoDescription=Odysseus AI Environment Installer
 VersionInfoProductName=Odysseus AI Environment
-VersionInfoProductVersion=1.0.0
-VersionInfoVersion=1.0.0.0
+VersionInfoProductVersion=0.2.0
+VersionInfoVersion=0.2.0.0
 VersionInfoCopyright=Copyright (c) Odysseus Team
 DefaultDirName={autopf}\Odysseus
 DefaultGroupName=Odysseus AI
@@ -22,13 +22,14 @@ SetupLogging=yes
 
 [Files]
 Source: "..\scripts\windows\Launch-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
+Source: "..\scripts\windows\Update-Odysseus-NetworkingAdmin.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Prepare-WslForOdysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\wsl\run_odysseus.sh"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\Audit-Odysseus.ps1"; DestDir: "{app}"; Flags: ignoreversion; Check: IsLocalInstallation
 Source: "..\scripts\windows\lib\Odysseus.RuntimeChecks.psm1"; DestDir: "{app}\lib"; Flags: ignoreversion; Check: IsLocalInstallation
 
 [Icons]
-Name: "{autodesktop}\Launch Odysseus (Local)"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
+Name: "{autodesktop}\Launch Odysseus"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""try {{ & '{app}\Launch-Odysseus.ps1' } catch {{ Write-Host ('[FATAL] ' + $_.Exception.Message) -ForegroundColor Red; Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray; Read-Host 'A fatal error occurred. Press ENTER to close...' }"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{group}\Prepare WSL for Odysseus"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Prepare-WslForOdysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{autodesktop}\Prepare WSL for Odysseus"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Prepare-WslForOdysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 13; WorkingDir: "{app}"; Check: IsLocalInstallation
 Name: "{group}\Odysseus Health Audit"; Filename: "{sysnative}\windowspowershell\v1.0\powershell.exe"; Parameters: "-NoExit -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command ""& '{app}\Audit-Odysseus.ps1'"""; IconFilename: "{sys}\shell32.dll"; IconIndex: 168; WorkingDir: "{app}"; Check: IsLocalInstallation
@@ -42,7 +43,11 @@ Filename: "cmd.exe"; Parameters: "/c ""netsh.exe advfirewall firewall delete rul
 var
   DeploymentPage: TWizardPage;
   DeploymentInfoLabel: TNewStaticText;
+  HostModeWarningLabel: TNewStaticText;
   GpuSupportNoteLabel: TNewStaticText;
+  LocalModeRadio: TNewRadioButton;
+  HostModeRadio: TNewRadioButton;
+  SelectedDeploymentIsHost: Boolean;
   LocalPreflightChecked: Boolean;
   LocalPreflightHasWsl: Boolean;
   LocalPreflightHasUbuntu: Boolean;
@@ -60,6 +65,11 @@ var
 function IsLocalInstallation: Boolean;
 begin
   Result := True;
+end;
+
+function IsHostDeploymentSelected: Boolean;
+begin
+  Result := Assigned(HostModeRadio) and HostModeRadio.Checked;
 end;
 
 function RunPowerShellExitCheck(const Script: string): Integer;
@@ -120,9 +130,14 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoType
 var
   S: string;
 begin
+  SelectedDeploymentIsHost := IsHostDeploymentSelected;
+
   S := '';
   S := S + 'Deployment mode:' + Space;
-  S := S + 'Local instance on this computer' + NewLine;
+  if SelectedDeploymentIsHost then
+    S := S + 'LAN Host (remote browser clients on your network)' + NewLine
+  else
+    S := S + 'Local (this computer only)' + NewLine;
 
   S := S + NewLine + 'Already present:' + NewLine;
   RefreshLocalPreflightChecks;
@@ -141,6 +156,14 @@ begin
   S := S + '- Default repo ref: dev (advanced override via odysseus-launcher.config)' + NewLine;
   S := S + '- Default repo sync mode: managed-clean (advanced override via odysseus-launcher.config)' + NewLine;
   S := S + '- Default rebuild mode: ask (advanced override via odysseus-launcher.config)' + NewLine;
+  if SelectedDeploymentIsHost then begin
+    S := S + '- Default browser behavior: auto-open browser on host launch' + NewLine;
+    S := S + '- Default app bind host: 0.0.0.0 (LAN access)' + NewLine;
+  end
+  else begin
+    S := S + '- Default browser behavior: auto-open local browser on launch' + NewLine;
+    S := S + '- Default app bind host: 127.0.0.1 (local-only access unless changed)' + NewLine;
+  end;
   S := S + '- Firewall rule for inbound TCP 11434 (all profiles, WSL -> Ollama bridge)' + NewLine;
 
   S := S + NewLine + 'Manual action required:' + NewLine;
@@ -181,24 +204,49 @@ begin
   LinkLabel.Caption := 'Review Web Licenses: <a href="https://apache.org">Apache 2.0</a> | <a href="https://ubuntu.com">Ubuntu Legal</a> | <a href="https://git-scm.com">Git GPL</a>';
   LinkLabel.OnLinkClick := @OnLicenseLinkClick;
 
-  DeploymentPage := CreateCustomPage(wpLicense, 'Local Installation', 'Odysseus installs as a local instance on this computer.');
+  DeploymentPage := CreateCustomPage(wpLicense, 'Deployment Mode', 'Choose how Odysseus will be deployed on this machine.');
 
   DeploymentInfoLabel := TNewStaticText.Create(DeploymentPage);
   DeploymentInfoLabel.Parent := DeploymentPage.Surface;
-  DeploymentInfoLabel.Caption := 'This installer configures the local Odysseus launcher only. Advanced runtime overrides (repo ref, sync mode, rebuild mode, and endpoint host overrides) are available in odysseus-launcher.config after install.';
+  DeploymentInfoLabel.Caption := 'Select Local mode for loopback-only access, or LAN Host mode for browser clients on your network. Advanced runtime overrides are available in odysseus-launcher.config after install.';
   DeploymentInfoLabel.Left := ScaleX(8);
   DeploymentInfoLabel.Top := ScaleY(16);
   DeploymentInfoLabel.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
   DeploymentInfoLabel.WordWrap := True;
 
+  LocalModeRadio := TNewRadioButton.Create(DeploymentPage);
+  LocalModeRadio.Parent := DeploymentPage.Surface;
+  LocalModeRadio.Caption := 'Local mode (127.0.0.1 only)';
+  LocalModeRadio.Left := ScaleX(8);
+  LocalModeRadio.Top := DeploymentInfoLabel.Top + DeploymentInfoLabel.Height + ScaleY(12);
+  LocalModeRadio.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
+  LocalModeRadio.Checked := True;
+
+  HostModeRadio := TNewRadioButton.Create(DeploymentPage);
+  HostModeRadio.Parent := DeploymentPage.Surface;
+  HostModeRadio.Caption := 'LAN Host mode (0.0.0.0 bind for network browser access)';
+  HostModeRadio.Left := ScaleX(8);
+  HostModeRadio.Top := LocalModeRadio.Top + LocalModeRadio.Height + ScaleY(8);
+  HostModeRadio.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
+
+  HostModeWarningLabel := TNewStaticText.Create(DeploymentPage);
+  HostModeWarningLabel.Parent := DeploymentPage.Surface;
+  HostModeWarningLabel.Caption := 'Important: LAN Host mode is intended for trusted private networks only. TLS/auth hardening is not enabled by default in this release.';
+  HostModeWarningLabel.Left := ScaleX(8);
+  HostModeWarningLabel.Top := HostModeRadio.Top + HostModeRadio.Height + ScaleY(10);
+  HostModeWarningLabel.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
+  HostModeWarningLabel.WordWrap := True;
+  HostModeWarningLabel.Font.Style := [fsBold];
+
   GpuSupportNoteLabel := TNewStaticText.Create(DeploymentPage);
   GpuSupportNoteLabel.Parent := DeploymentPage.Surface;
-  GpuSupportNoteLabel.Caption := 'Note: AMD GPU acceleration is not currently auto-detected in this installer. Local runs on unsupported GPUs may fall back to CPU mode.';
+  GpuSupportNoteLabel.Caption := 'Note: AMD GPU acceleration is not currently auto-detected in this installer. Runs on unsupported GPUs may fall back to CPU mode.';
   GpuSupportNoteLabel.Left := ScaleX(8);
-  GpuSupportNoteLabel.Top := DeploymentInfoLabel.Top + DeploymentInfoLabel.Height + ScaleY(10);
+  GpuSupportNoteLabel.Top := HostModeWarningLabel.Top + HostModeWarningLabel.Height + ScaleY(10);
   GpuSupportNoteLabel.Width := DeploymentPage.SurfaceWidth - ScaleX(16);
   GpuSupportNoteLabel.WordWrap := True;
 
+  SelectedDeploymentIsHost := False;
   LocalPreflightChecked := False;
 end;
 
@@ -224,12 +272,19 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   IsNvidiaDetected: Boolean;
+  SelectedModeName: string;
 begin
   Result := True;
   if CurPageID = DeploymentPage.ID then begin
+    SelectedDeploymentIsHost := IsHostDeploymentSelected;
+    if SelectedDeploymentIsHost then
+      SelectedModeName := 'LAN Host'
+    else
+      SelectedModeName := 'Local';
+
     IsNvidiaDetected := IsNvidiaGpuPresent;
     if not IsNvidiaDetected then begin
-      if MsgBox('WARNING: No dedicated NVIDIA GPU was detected.' + #13#10#13#10 + 'Odysseus will run in "CPU-Only mode" locally with reduced processing speeds.' + #13#10#13#10 + 'Do you want to proceed with a local CPU installation?', mbConfirmation, MB_YESNO) = IDNO then
+      if MsgBox('WARNING: No dedicated NVIDIA GPU was detected.' + #13#10#13#10 + 'Odysseus will run in CPU-only mode with reduced processing speeds.' + #13#10#13#10 + 'Do you want to proceed with a CPU installation in ' + SelectedModeName + ' mode?', mbConfirmation, MB_YESNO) = IDNO then
         Result := False;
     end;
   end;
@@ -241,12 +296,29 @@ var
   LauncherConfig: string;
 begin
   if (CurStep = ssPostInstall) and IsLocalInstallation then begin
+    SelectedDeploymentIsHost := IsHostDeploymentSelected;
+
     { Single launcher config replaces the former per-key marker files. }
-    LauncherConfig :=
-      'ODYSSEUS_REPO_REF=dev' + #13#10 +
-      'ODYSSEUS_REBUILD_MODE=ask' + #13#10 +
-      'ODYSSEUS_REPO_SYNC_MODE=managed-clean' + #13#10 +
-      'ODYSSEUS_HOST_MODE=0' + #13#10;
+    if SelectedDeploymentIsHost then begin
+      LauncherConfig :=
+        'ODYSSEUS_DEPLOYMENT_MODE=lan-host' + #13#10 +
+        'ODYSSEUS_REPO_REF=dev' + #13#10 +
+        'ODYSSEUS_REBUILD_MODE=ask' + #13#10 +
+        'ODYSSEUS_REPO_SYNC_MODE=managed-clean' + #13#10 +
+        'ODYSSEUS_HOST_MODE=1' + #13#10 +
+        'ODYSSEUS_OPEN_BROWSER=1' + #13#10 +
+        'ODYSSEUS_APP_BIND_HOST=0.0.0.0' + #13#10;
+    end
+    else begin
+      LauncherConfig :=
+        'ODYSSEUS_DEPLOYMENT_MODE=local' + #13#10 +
+        'ODYSSEUS_REPO_REF=dev' + #13#10 +
+        'ODYSSEUS_REBUILD_MODE=ask' + #13#10 +
+        'ODYSSEUS_REPO_SYNC_MODE=managed-clean' + #13#10 +
+        'ODYSSEUS_HOST_MODE=0' + #13#10 +
+        'ODYSSEUS_OPEN_BROWSER=1' + #13#10 +
+        'ODYSSEUS_APP_BIND_HOST=127.0.0.1' + #13#10;
+    end;
 
     SaveStringToFile(ExpandConstant('{app}') + '\odysseus-launcher.config', LauncherConfig, False);
 
@@ -274,7 +346,10 @@ begin
       MsgBox('WSL is installed, but no Ubuntu distribution was found.' + #13#10#13#10 + 'Use the "Prepare WSL for Odysseus" shortcut. It installs Ubuntu and guides first-run setup.', mbCriticalError, MB_OK);
     end
     else begin
-      MsgBox('WSL and Ubuntu are ready. Use the desktop shortcut "Launch Odysseus (Local)" to start Odysseus.', mbInformation, MB_OK);
+      if SelectedDeploymentIsHost then
+        MsgBox('WSL and Ubuntu are ready. Use the desktop shortcut "Launch Odysseus" to start Odysseus in LAN Host mode. Clients on your network can connect using the launcher-reported host URL.', mbInformation, MB_OK)
+      else
+        MsgBox('WSL and Ubuntu are ready. Use the desktop shortcut "Launch Odysseus" to start Odysseus in Local mode.', mbInformation, MB_OK);
     end;
   end;
 end;

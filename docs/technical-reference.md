@@ -23,19 +23,21 @@ This document describes current local-installer pipeline and runtime behavior.
 
 ### Wizard flow
 
-The installer is local-only and keeps a minimal flow:
+The installer is local/LAN-host capable and keeps a minimal flow:
 
 1. Licence agreement.
-2. Local installation info page.
-3. Ready/summary page.
+2. Deployment mode selection page (Local or LAN Host).
+3. Installation info page.
+4. Ready/summary page.
 
-There is no remote/shared-instance wizard mode and no branch-selection page.
+There is no internet/shared-instance wizard mode and no branch-selection page.
 
 ### Installer outputs and shortcuts
 
 Setup copies:
 
 - `Launch-Odysseus.ps1`
+- `Update-Odysseus-NetworkingAdmin.ps1`
 - `Prepare-WslForOdysseus.ps1`
 - `run_odysseus.sh`
 - `Audit-Odysseus.ps1`
@@ -43,7 +45,7 @@ Setup copies:
 
 Shortcuts created:
 
-- `Launch Odysseus (Local)`
+- `Launch Odysseus`
 - `Prepare WSL for Odysseus` (Start menu + desktop)
 - `Odysseus Health Audit` (Start menu + desktop)
 
@@ -53,12 +55,29 @@ Installer writes one local config file under `{app}`:
 
 - `odysseus-launcher.config`
 
-Default values:
+Default values are seeded from the selected installer mode.
+
+Local mode defaults:
+
+- `ODYSSEUS_DEPLOYMENT_MODE=local`
+- `ODYSSEUS_HOST_MODE=0`
+- `ODYSSEUS_APP_BIND_HOST=127.0.0.1`
+- `ODYSSEUS_OPEN_BROWSER=1`
+
+LAN Host mode defaults:
+
+- `ODYSSEUS_DEPLOYMENT_MODE=lan-host`
+- `ODYSSEUS_HOST_MODE=1`
+- `ODYSSEUS_APP_BIND_HOST=0.0.0.0`
+- `ODYSSEUS_OPEN_BROWSER=1`
+
+Shared defaults in both modes:
 
 - `ODYSSEUS_REPO_REF=dev`
 - `ODYSSEUS_REPO_SYNC_MODE=managed-clean`
 - `ODYSSEUS_REBUILD_MODE=ask`
-- `ODYSSEUS_HOST_MODE=0`
+
+Important: LAN Host mode is intended for trusted private networks only. TLS/auth hardening is not enabled by default in this release.
 
 Legacy marker files are removed during install.
 
@@ -73,6 +92,10 @@ Installer performs readiness checks only:
 
 Installer configures inbound TCP `11434` rule (`Odysseus Ollama WSL Bridge`) for WSL-to-Windows Ollama traffic.
 
+Launcher additionally ensures inbound TCP `7000` rule (`Odysseus AI Network Host`, Private profile) when host mode is enabled with non-loopback bind host.
+
+If LAN host mode also needs a Windows `portproxy` update for WSL-to-LAN forwarding and the launcher is not already elevated, it prompts for elevation and runs `Update-Odysseus-NetworkingAdmin.ps1` to apply the required host networking changes.
+
 ---
 
 ## 2. Launcher (`scripts/windows/Launch-Odysseus.ps1`)
@@ -85,28 +108,38 @@ Launcher responsibilities:
 4. Ensure systemd setup required for runtime.
 5. Ensure Ollama availability and reachability setup.
 6. Stage and run WSL bootstrap (`run_odysseus.sh`).
-7. Poll app endpoint readiness (`http://localhost:7000`).
-8. Open browser.
-9. Start watchdog monitoring loop.
+7. Poll app endpoint readiness (`http://127.0.0.1:7000`).
+8. Print host-local and LAN client URLs (when host mode is enabled).
+9. Open browser (unless `ODYSSEUS_OPEN_BROWSER=0`).
+10. Start watchdog monitoring loop.
 
 ### Runtime preferences and forwarding
 
 Launcher reads `odysseus-launcher.config` and supports config/env override behavior:
 
+- `ODYSSEUS_DEPLOYMENT_MODE` (`local|lan-host`)
 - `ODYSSEUS_REPO_REF`
 - `ODYSSEUS_REPO_SYNC_MODE` (`managed-clean|managed-ff|unmanaged`)
 - `ODYSSEUS_REBUILD_MODE` (`ask|always|never`)
-- `ODYSSEUS_HOST_MODE`
+- `ODYSSEUS_HOST_MODE` (legacy fallback if deployment mode key is absent)
+- `ODYSSEUS_OPEN_BROWSER`
+- `ODYSSEUS_APP_BIND_HOST`
 - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- `ODYSSEUS_OLLAMA_HOST`
 - `ODYSSEUS_TEST_MODE`
+
+Precedence note: `ODYSSEUS_DEPLOYMENT_MODE` is authoritative when set; `ODYSSEUS_HOST_MODE` is retained as a backward-compatible fallback.
 
 Forwarded into WSL via `WSLENV`:
 
+- `ODYSSEUS_DEPLOYMENT_MODE`
 - `ODYSSEUS_HOST_MODE`
 - `ODYSSEUS_REPO_REF`
 - `ODYSSEUS_REPO_SYNC_MODE`
 - `ODYSSEUS_REBUILD`
 - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- `ODYSSEUS_OLLAMA_HOST`
+- `ODYSSEUS_APP_BIND_HOST`
 - `ODYSSEUS_TEST_MODE`
 
 ### Test mode
@@ -132,11 +165,12 @@ Bootstrap handles dependency readiness, source sync, runtime env generation, com
 
 `resolve_windows_ollama_host` probes candidates in order:
 
-1. Explicit override (`ODYSSEUS_WINDOWS_HOST_OVERRIDE`)
-2. Windows default-route IPv4
-3. WSL resolver nameserver
-4. WSL default gateway
-5. `host.docker.internal`
+1. Explicit override (`ODYSSEUS_OLLAMA_HOST`)
+2. Explicit override (`ODYSSEUS_WINDOWS_HOST_OVERRIDE`)
+3. Windows default-route IPv4
+4. WSL resolver nameserver
+5. WSL default gateway
+6. `host.docker.internal`
 
 ### Repo sync behavior
 
@@ -149,6 +183,16 @@ Uses `ODYSSEUS_REPO_REF` and `ODYSSEUS_REPO_SYNC_MODE`:
 ### Compose behavior
 
 Compose invocation is built from runtime profile (`--env-file` plus resolved compose files).
+
+`ODYSSEUS_APP_BIND_HOST` controls whether a host-mode compose override is generated:
+
+- `127.0.0.1` keeps local-only binding.
+- Any other IPv4 host value publishes `7000` on that interface.
+
+`ODYSSEUS_DEPLOYMENT_MODE` drives the default bind behavior when `ODYSSEUS_APP_BIND_HOST` is not set:
+
+- `local` defaults to `127.0.0.1`
+- `lan-host` defaults to `0.0.0.0`
 
 ---
 

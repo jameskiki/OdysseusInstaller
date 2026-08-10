@@ -100,10 +100,163 @@ if (Test-Path $LauncherConfigFile) {
     }
 }
 
-$IsHostMode = ($LauncherConfig['ODYSSEUS_HOST_MODE'] -match '^(1|true|yes)$')
-$IsTestMode = $TestMode -or ($LauncherConfig['ODYSSEUS_TEST_MODE'] -match '^(1|true|yes)$') -or (($env:ODYSSEUS_TEST_MODE -as [string]) -match '^(1|true|yes)$')
+function Test-TruthyValue {
+    param([string]$Value)
+    return (($Value -as [string]) -match '^(1|true|yes)$')
+}
+
+function Test-FalsyValue {
+    param([string]$Value)
+    return (($Value -as [string]) -match '^(0|false|no)$')
+}
+
+function Resolve-PrimaryWindowsIpv4 {
+    # Get the primary route
+    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -eq 'Alive' -and $_.NextHop -ne '0.0.0.0' } |
+        Sort-Object RouteMetric, InterfaceMetric |
+        Select-Object -First 1
+
+    if ($null -eq $route) {
+        return $null
+    }
+
+    # Get the network interface for this route
+    $interface = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+    
+    # Skip virtual adapters (WSL, Hyper-V, etc)
+    if ($interface -and $interface.Virtual -eq $true) {
+        # Try to find an alternate non-virtual interface with a valid IP
+        $altRoute = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Alive' -and $_.NextHop -ne '0.0.0.0' } |
+            Sort-Object RouteMetric, InterfaceMetric
+        
+        foreach ($alt in $altRoute) {
+            $altInterface = Get-NetAdapter -InterfaceIndex $alt.InterfaceIndex -ErrorAction SilentlyContinue
+            if ($altInterface -and $altInterface.Virtual -ne $true) {
+                $route = $alt
+                break
+            }
+        }
+    }
+
+    # Get candidate IPs from the selected interface
+    # Exclude: loopback (127.x), link-local APIPA (169.254.x), and Hyper-V/WSL virtual adapters (172.29.x, 172.30.x, 172.31.x)
+    $candidate = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue |
+        Where-Object { 
+            $_.IPAddress -notmatch '^127\.' `
+            -and $_.IPAddress -notmatch '^169\.254\.' `
+            -and $_.IPAddress -notmatch '^172\.(29|30|31)\.' `
+            -and $_.PrefixOrigin -ne 'WellKnown' 
+        } |
+        Sort-Object SkipAsSource |
+        Select-Object -First 1
+
+    if ($null -eq $candidate) {
+        return $null
+    }
+
+    return $candidate.IPAddress
+}
+
+$deploymentModeSource = $null
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_DEPLOYMENT_MODE)) {
+    $deploymentModeSource = $env:ODYSSEUS_DEPLOYMENT_MODE.Trim().ToLowerInvariant()
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_DEPLOYMENT_MODE'])) {
+    $deploymentModeSource = $LauncherConfig['ODYSSEUS_DEPLOYMENT_MODE'].Trim().ToLowerInvariant()
+}
+
+$legacyHostModeSource = if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_HOST_MODE)) {
+    $env:ODYSSEUS_HOST_MODE
+}
+else {
+    $LauncherConfig['ODYSSEUS_HOST_MODE']
+}
+$legacyHostModeEnabled = (Test-TruthyValue -Value $legacyHostModeSource)
+
+$DeploymentMode = $null
+switch ($deploymentModeSource) {
+    'local' { $DeploymentMode = 'local' }
+    'lan-host' { $DeploymentMode = 'lan-host' }
+    default {
+        if (-not [string]::IsNullOrWhiteSpace($deploymentModeSource)) {
+            Write-Host "[WARN] ODYSSEUS_DEPLOYMENT_MODE value '$deploymentModeSource' is not supported. Expected 'local' or 'lan-host'. Falling back to ODYSSEUS_HOST_MODE." -ForegroundColor Yellow
+        }
+    }
+}
+
+if ($null -eq $DeploymentMode) {
+    $DeploymentMode = if ($legacyHostModeEnabled) { 'lan-host' } else { 'local' }
+}
+
+$IsHostMode = ($DeploymentMode -eq 'lan-host')
+if (-not [string]::IsNullOrWhiteSpace($deploymentModeSource) -and -not [string]::IsNullOrWhiteSpace($legacyHostModeSource)) {
+    if ($IsHostMode -ne $legacyHostModeEnabled) {
+        Write-Host "[WARN] ODYSSEUS_DEPLOYMENT_MODE ('$DeploymentMode') overrides ODYSSEUS_HOST_MODE ('$legacyHostModeSource')." -ForegroundColor Yellow
+    }
+}
+
+$IsTestMode = $TestMode -or (Test-TruthyValue -Value $LauncherConfig['ODYSSEUS_TEST_MODE']) -or (Test-TruthyValue -Value $env:ODYSSEUS_TEST_MODE)
+$env:ODYSSEUS_DEPLOYMENT_MODE = $DeploymentMode
 $env:ODYSSEUS_HOST_MODE = if ($IsHostMode) { '1' } else { '0' }
 $env:ODYSSEUS_TEST_MODE = if ($IsTestMode) { '1' } else { '0' }
+
+$appBindHost = if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_APP_BIND_HOST)) {
+    $env:ODYSSEUS_APP_BIND_HOST.Trim()
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_APP_BIND_HOST'])) {
+    $LauncherConfig['ODYSSEUS_APP_BIND_HOST'].Trim()
+}
+elseif ($IsHostMode) {
+    '0.0.0.0'
+}
+else {
+    '127.0.0.1'
+}
+
+if ($appBindHost -eq 'localhost') {
+    $appBindHost = '127.0.0.1'
+}
+$env:ODYSSEUS_APP_BIND_HOST = $appBindHost
+
+if ([string]::IsNullOrWhiteSpace($env:ODYSSEUS_OLLAMA_HOST) -and -not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_OLLAMA_HOST'])) {
+    $env:ODYSSEUS_OLLAMA_HOST = $LauncherConfig['ODYSSEUS_OLLAMA_HOST'].Trim()
+}
+
+$OpenBrowser = $true
+$openBrowserSource = $null
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_OPEN_BROWSER)) {
+    $openBrowserSource = $env:ODYSSEUS_OPEN_BROWSER
+}
+elseif (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_OPEN_BROWSER'])) {
+    $openBrowserSource = $LauncherConfig['ODYSSEUS_OPEN_BROWSER']
+}
+
+if ($null -ne $openBrowserSource) {
+    if (Test-TruthyValue -Value $openBrowserSource) {
+        $OpenBrowser = $true
+    }
+    elseif (Test-FalsyValue -Value $openBrowserSource) {
+        $OpenBrowser = $false
+    }
+    else {
+        Write-Host "[WARN] ODYSSEUS_OPEN_BROWSER value '$openBrowserSource' is not parseable. Expected one of: 1, true, yes, 0, false, no. Using default: open browser." -ForegroundColor Yellow
+    }
+}
+
+$OdysseusLocalUrl = 'http://127.0.0.1:7000'
+$OdysseusClientUrl = $OdysseusLocalUrl
+if ($IsHostMode) {
+    $lanIp = Resolve-PrimaryWindowsIpv4
+    if ($lanIp) {
+        $OdysseusClientUrl = "http://${lanIp}:7000"
+        Write-Host "[DEBUG] Resolved primary Windows LAN IPv4: $lanIp" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "[WARN] Host mode is enabled, but no primary Windows LAN IPv4 could be resolved (no route found or no valid interface IP). Client LAN URL is unavailable; host-local URL remains $OdysseusLocalUrl. Try running 'ipconfig /all' in PowerShell to diagnose network configuration." -ForegroundColor Yellow
+    }
+}
 $repoRef = 'dev'
 if (-not [string]::IsNullOrWhiteSpace($LauncherConfig['ODYSSEUS_REPO_REF'])) {
     $repoRef = $LauncherConfig['ODYSSEUS_REPO_REF']
@@ -148,14 +301,18 @@ switch ($rebuildMode) {
 }
 
 if ($IsHostMode) {
-    Write-Host "[WARN] ODYSSEUS_HOST_MODE is enabled via configuration. This may expose Odysseus beyond localhost based on runtime compose settings." -ForegroundColor Yellow
+    Write-Host "[WARN] Deployment mode is '$DeploymentMode'. This may expose Odysseus beyond localhost based on runtime compose settings." -ForegroundColor Yellow
 }
 
 if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)) {
     Write-Host "[INFO] Using explicit Windows host override for WSL Ollama reachability: $($env:ODYSSEUS_WINDOWS_HOST_OVERRIDE)" -ForegroundColor DarkGray
 }
 
-$wslEnvVars = @('ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_TEST_MODE')
+if (-not [string]::IsNullOrWhiteSpace($env:ODYSSEUS_OLLAMA_HOST)) {
+    Write-Host "[INFO] Using explicit Ollama host override for WSL reachability: $($env:ODYSSEUS_OLLAMA_HOST)" -ForegroundColor DarkGray
+}
+
+$wslEnvVars = @('ODYSSEUS_DEPLOYMENT_MODE', 'ODYSSEUS_HOST_MODE', 'ODYSSEUS_REPO_REF', 'ODYSSEUS_REPO_SYNC_MODE', 'ODYSSEUS_REBUILD', 'ODYSSEUS_WINDOWS_HOST_OVERRIDE', 'ODYSSEUS_OLLAMA_HOST', 'ODYSSEUS_APP_BIND_HOST', 'ODYSSEUS_TEST_MODE')
 if ([string]::IsNullOrEmpty($env:WSLENV)) {
     $env:WSLENV = ($wslEnvVars -join ':')
 }
@@ -473,6 +630,215 @@ function Confirm-OllamaFirewallBridge {
     }
 }
 
+function Confirm-OdysseusHostFirewallRule {
+    param(
+        [bool]$HostModeEnabled,
+        [string]$BindHost
+    )
+
+    if (-not $HostModeEnabled -or $BindHost -eq '127.0.0.1') {
+        Write-Host "[INFO] Port 7000 firewall host rule not required for loopback-only mode." -ForegroundColor DarkGray
+        return
+    }
+
+    $ruleName = 'Odysseus AI Network Host'
+    $status = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName
+    if ($status.Status -eq 'Enabled') {
+        Write-Host "[INFO] Firewall rule '$ruleName' is already enabled for client access on port 7000." -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host "[INFO] Configuring firewall rule '$ruleName' for inbound TCP 7000 (Private profile)." -ForegroundColor DarkGray
+    
+    try {
+        & netsh.exe advfirewall firewall delete rule name="$ruleName" dir=in 2>&1 | Out-Null
+        & netsh.exe advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=7000 profile=private enable=yes 2>&1 | Out-Null
+        
+        # Wait briefly for rule to be written
+        Start-Sleep -Milliseconds 500
+        
+        # Retry the verification up to 3 times
+        $verifyAttempts = 0
+        $maxAttempts = 3
+        while ($verifyAttempts -lt $maxAttempts) {
+            $updated = Get-OdysseusFirewallRuleStatus -DisplayName $ruleName -ErrorAction SilentlyContinue
+            if ($updated.Status -eq 'Enabled') {
+                Write-Host "[INFO] Firewall rule '$ruleName' is enabled." -ForegroundColor DarkGray
+                return
+            }
+            $verifyAttempts++
+            if ($verifyAttempts -lt $maxAttempts) {
+                Start-Sleep -Milliseconds 300
+            }
+        }
+        
+        # If we get here, verification failed after retries
+        Write-Host "[WARN] Could not verify firewall rule '$ruleName' after configuration attempt. The netsh command completed, but the rule could not be found by Get-NetFirewallRule. Attempting manual verification..." -ForegroundColor Yellow
+        
+        # Try alternative verification via netsh query
+        $queryResult = & netsh.exe advfirewall firewall show rule name="$ruleName" 2>&1
+        if ($queryResult -match 'enabled') {
+            Write-Host "[INFO] Firewall rule '$ruleName' verified via netsh (may require firewall policy refresh). You may need to restart the service or disable/re-enable the rule." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "[WARN] Firewall rule '$ruleName' could not be verified. If client connectivity fails, check Windows Defender Firewall settings manually and ensure inbound TCP port 7000 is allowed for Private networks." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "[WARN] Error while configuring firewall rule '$ruleName': $_. You may need to configure the rule manually in Windows Defender Firewall (inbound, Private profile, TCP port 7000)." -ForegroundColor Yellow
+    }
+}
+
+function Resolve-WslIpAddress {
+    try {
+        $wslOutput = & wsl hostname -I 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[WARN] WSL command failed: $wslOutput" -ForegroundColor Yellow
+            return $null
+        }
+        
+        $ips = $wslOutput.Trim().Split() | Where-Object { $_ }
+        if ($ips.Count -gt 0) {
+            return $ips[0]
+        }
+        return $null
+    }
+    catch {
+        Write-Host "[WARN] Could not resolve WSL IP address: $_" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Configure-WslPortProxy {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WindowsIpAddress) -or [string]::IsNullOrWhiteSpace($WslIpAddress)) {
+        Write-Host "[WARN] Cannot configure WSL port proxy: missing IP addresses." -ForegroundColor Yellow
+        return
+    }
+
+    # Check if already configured
+    try {
+        $existing = & netsh.exe interface portproxy show v4tov4 2>&1 | Select-String "listenport=$Port"
+        if ($existing) {
+            Write-Host "[INFO] WSL port proxy for port $Port is already configured." -ForegroundColor DarkGray
+            return
+        }
+    }
+    catch {
+        # Continue if query fails
+    }
+
+    Write-Host "[INFO] Configuring WSL port proxy: Windows ${WindowsIpAddress}:${Port} -> WSL ${WslIpAddress}:${Port}" -ForegroundColor DarkGray
+    
+    try {
+        # Remove any existing proxy for this port first
+        & netsh.exe interface portproxy delete v4tov4 listenport=$Port listenaddress=$WindowsIpAddress 2>&1 | Out-Null
+        
+        # Add the new port proxy
+        & netsh.exe interface portproxy add v4tov4 listenport=$Port listenaddress=$WindowsIpAddress connectport=$Port connectaddress=$WslIpAddress protocol=tcp 2>&1 | Out-Null
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[INFO] WSL port proxy configured successfully." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "[WARN] WSL port proxy configuration returned non-zero exit code. The proxy may not be functional." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "[WARN] Error while configuring WSL port proxy: $_. Remote clients may not be able to reach the app." -ForegroundColor Yellow
+    }
+}
+
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-WslPortProxyConfigured {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WindowsIpAddress) -or [string]::IsNullOrWhiteSpace($WslIpAddress)) {
+        return $false
+    }
+
+    try {
+        $rows = & netsh.exe interface portproxy show v4tov4 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+
+        $rawText = ($rows | ForEach-Object { $_.ToString().Trim() }) -join "`n"
+        $pattern = "(?im)^\s*$([regex]::Escape($WindowsIpAddress))\s+$Port\s+$([regex]::Escape($WslIpAddress))\s+$Port\s*$"
+        return [regex]::IsMatch($rawText, $pattern)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-OdysseusElevatedNetworkSetup {
+    param(
+        [string]$WindowsIpAddress,
+        [string]$WslIpAddress,
+        [int]$Port = 7000,
+        [switch]$EnsureHostFirewallRule
+    )
+
+    $helperScript = Join-Path $ScriptRoot 'Update-Odysseus-NetworkingAdmin.ps1'
+    if (-not (Test-Path $helperScript)) {
+        Write-Host "[WARN] Missing elevated networking helper script at '$helperScript'. Cannot request admin remediation automatically." -ForegroundColor Yellow
+        return $false
+    }
+
+    $argList = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$helperScript`"",
+        '-WindowsIpAddress', $WindowsIpAddress,
+        '-WslIpAddress', $WslIpAddress,
+        '-Port', $Port
+    )
+    if ($EnsureHostFirewallRule) {
+        $argList += '-EnsureHostFirewallRule'
+    }
+
+    try {
+        Write-Host "[INFO] Requesting elevation to configure Windows firewall/portproxy for LAN host mode..." -ForegroundColor Yellow
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -WindowStyle Normal -PassThru -Wait
+        if ($null -eq $proc) {
+            Write-Host "[WARN] Elevated network setup did not start. Remote LAN access may not work." -ForegroundColor Yellow
+            return $false
+        }
+
+        if ($proc.ExitCode -ne 0) {
+            Write-Host "[WARN] Elevated network setup exited with code $($proc.ExitCode). Remote LAN access may not work." -ForegroundColor Yellow
+            return $false
+        }
+
+        Write-Host "[INFO] Elevated network setup completed successfully." -ForegroundColor DarkGray
+        return $true
+    }
+    catch {
+        Write-Host "[WARN] Elevated network setup was not completed ($($_.Exception.Message)). Remote LAN access may not work." -ForegroundColor Yellow
+        return $false
+    }
+}
+
 function Invoke-WslCommand {
     param([string]$Command)
 
@@ -565,8 +931,8 @@ function Test-OdysseusRuntimeHealth {
         }
     }
 
-    if (-not (Test-HttpEndpoint -Uri 'http://localhost:7000' -TimeoutSec 3)) {
-        $issues.Add('Odysseus app endpoint is down (http://localhost:7000).')
+    if (-not (Test-HttpEndpoint -Uri $OdysseusLocalUrl -TimeoutSec 3)) {
+        $issues.Add(("Odysseus app endpoint is down ({0})." -f $OdysseusLocalUrl))
     }
 
     return [PSCustomObject]@{
@@ -699,12 +1065,24 @@ Invoke-Step `
             Write-Host "[INFO] Launcher test mode is active. Interactive prompts and runtime side effects are disabled." -ForegroundColor DarkGray
         }
         Write-Host "[INFO] Installer default is local-only. Advanced overrides are config-driven." -ForegroundColor DarkGray
+        Write-Host "[INFO] Deployment mode: $DeploymentMode" -ForegroundColor DarkGray
         Write-Host "[INFO] Repo sync mode: $repoSyncMode" -ForegroundColor DarkGray
         if ($env:ODYSSEUS_REBUILD -eq '1') {
             Write-Host "[INFO] This launch will rebuild container images." -ForegroundColor Yellow
         }
         else {
             Write-Host "[INFO] This launch will skip container rebuilds." -ForegroundColor Yellow
+        }
+        Write-Host "[INFO] App bind host target: $env:ODYSSEUS_APP_BIND_HOST" -ForegroundColor DarkGray
+        Write-Host "[INFO] Host-local endpoint check URL: $OdysseusLocalUrl" -ForegroundColor DarkGray
+        if ($IsHostMode) {
+            Write-Host "[INFO] Client access URL (same LAN): $OdysseusClientUrl" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "[INFO] Client LAN access is disabled in local mode. To allow client devices, set ODYSSEUS_DEPLOYMENT_MODE=lan-host (or ODYSSEUS_HOST_MODE=1) and relaunch." -ForegroundColor DarkGray
+        }
+        if (-not $OpenBrowser) {
+            Write-Host "[INFO] Browser auto-open is disabled for this launch." -ForegroundColor DarkGray
         }
     }
 
@@ -814,12 +1192,56 @@ Invoke-Step `
     }
 
 Invoke-Step `
+    -Intent "Configuring WSL port forwarding for remote LAN access..." `
+    -Action {
+        if ($IsHostMode -and $env:ODYSSEUS_APP_BIND_HOST -ne '127.0.0.1') {
+            $wslIp = Resolve-WslIpAddress
+            if ($wslIp) {
+                $firewallRuleName = 'Odysseus AI Network Host'
+                $firewallStatus = Get-OdysseusFirewallRuleStatus -DisplayName $firewallRuleName
+                $firewallNeedsFix = ($firewallStatus.Status -ne 'Enabled')
+
+                $portProxyNeedsFix = -not (Test-WslPortProxyConfigured -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000)
+
+                if (-not ($firewallNeedsFix -or $portProxyNeedsFix)) {
+                    Write-Host "[INFO] Host networking prerequisites already satisfy LAN host mode (firewall + portproxy)." -ForegroundColor DarkGray
+                    return
+                }
+
+                if (Test-IsAdministrator) {
+                    Write-Host "[INFO] Launcher is elevated. Applying required host networking changes directly." -ForegroundColor DarkGray
+                    if ($firewallNeedsFix) {
+                        Confirm-OdysseusHostFirewallRule -HostModeEnabled:$IsHostMode -BindHost $env:ODYSSEUS_APP_BIND_HOST
+                    }
+                    if ($portProxyNeedsFix) {
+                        Configure-WslPortProxy -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST -WslIpAddress $wslIp -Port 7000
+                    }
+                }
+                else {
+                    $elevatedOk = Invoke-OdysseusElevatedNetworkSetup `
+                        -WindowsIpAddress $env:ODYSSEUS_APP_BIND_HOST `
+                        -WslIpAddress $wslIp `
+                        -Port 7000 `
+                        -EnsureHostFirewallRule:$firewallNeedsFix
+
+                    if (-not $elevatedOk) {
+                        Write-Host "[WARN] Host networking could not be fully updated without elevation. Host-local access should still work, but LAN clients may fail until networking is remediated." -ForegroundColor Yellow
+                    }
+                }
+            }
+            else {
+                Write-Host "[WARN] Could not configure WSL port proxy: WSL IP address could not be determined. Remote LAN access may not work." -ForegroundColor Yellow
+            }
+        }
+    }
+
+Invoke-Step `
     -Intent "Verifying Odysseus web endpoint responsiveness before launch..." `
     -Action {
         $reachable = $false
         for ($i = 0; $i -lt 6; $i++) {
             try {
-                Invoke-WebRequest -Uri 'http://localhost:7000' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+                Invoke-WebRequest -Uri $OdysseusLocalUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
                 $reachable = $true
                 break
             }
@@ -828,13 +1250,46 @@ Invoke-Step `
             }
         }
         if (-not $reachable) {
-            throw "Odysseus did not become reachable on http://localhost:7000."
+            throw ("Odysseus did not become reachable on {0}." -f $OdysseusLocalUrl)
+        }
+
+        Write-Host "[INFO] Odysseus is reachable at host-local URL: $OdysseusLocalUrl" -ForegroundColor DarkGray
+        if ($IsHostMode) {
+            if ($OdysseusClientUrl -ne $OdysseusLocalUrl) {
+                Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host "[WARN] Client LAN URL could not be determined. Verify your network configuration and check the launcher log for diagnostic details. Use 'ipconfig /all' to find your Windows machine IP address and access http://<your-ip>:7000." -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
         }
     }
 
-Invoke-Step `
-    -Intent "Opening the Odysseus web interface in the default browser..." `
-    -Action { Start-Process 'http://localhost:7000' -ErrorAction Stop }
+if ($OpenBrowser) {
+    Invoke-Step `
+        -Intent "Opening the Odysseus web interface in the default browser..." `
+        -Action { Start-Process $OdysseusLocalUrl -ErrorAction Stop }
+}
+else {
+    Invoke-Step `
+        -Intent "Skipping browser auto-open and leaving endpoint details in this terminal..." `
+        -Action {
+            Write-Host "[INFO] Browser launch skipped. Open this URL from the host machine: $OdysseusLocalUrl" -ForegroundColor DarkGray
+            if ($IsHostMode) {
+                if ($OdysseusClientUrl -ne $OdysseusLocalUrl) {
+                    Write-Host "[INFO] Client machines on the same LAN can use: $OdysseusClientUrl" -ForegroundColor DarkGray
+                }
+                else {
+                    Write-Host "[WARN] Client LAN URL could not be determined. Verify your network configuration and check the launcher log for diagnostic details. Use 'ipconfig /all' to find your Windows machine IP address and access http://<your-ip>:7000." -ForegroundColor Yellow
+                }
+            }
+            else {
+                Write-Host "[INFO] Client LAN URL is not shown because deployment mode is local." -ForegroundColor DarkGray
+            }
+        }
+}
 
 Invoke-Step `
     -Intent "Starting live health watchdog (auto-heal light, 10s interval) while this window stays open..." `

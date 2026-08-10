@@ -12,7 +12,7 @@ You can chat with models, attach files, search documents, and switch models from
 
 ```mermaid
 graph LR
-    A[Browser] -->|http://localhost:7000| B[Odysseus Containers]
+    A[Browser (local or LAN client)] -->|http://host-or-local:7000| B[Odysseus Containers]
     B -->|resolved host endpoint:11434| C[Ollama on Windows]
     C --> D[Local AI Models]
 ```
@@ -33,7 +33,7 @@ On first launch, Odysseus writes credential-related startup output in the launch
 1. Watch terminal output during initial bootstrap.
 2. Copy the generated credential output shown.
 3. Continue when prompted.
-4. Browser opens to `http://localhost:7000`.
+4. Browser opens to `http://127.0.0.1:7000` by default, or use the launcher-printed LAN URL when host mode is enabled.
 5. Log in and rotate credentials as needed.
 
 ---
@@ -42,7 +42,7 @@ On first launch, Odysseus writes credential-related startup output in the launch
 
 ### Start a conversation
 
-1. Open `http://localhost:7000`.
+1. Open `http://127.0.0.1:7000` (or your host LAN URL in host mode).
 2. Click **New Chat**.
 3. Type your message and press **Enter**.
 
@@ -84,10 +84,15 @@ AMD note: installer does not auto-detect AMD acceleration paths. Expect CPU fall
 
 The installer does not expose advanced runtime options in wizard pages. Use `odysseus-launcher.config` for advanced behavior:
 
+- `ODYSSEUS_DEPLOYMENT_MODE`
 - `ODYSSEUS_REPO_REF`
 - `ODYSSEUS_REPO_SYNC_MODE`
 - `ODYSSEUS_REBUILD_MODE`
+- `ODYSSEUS_HOST_MODE`
+- `ODYSSEUS_APP_BIND_HOST`
+- `ODYSSEUS_OPEN_BROWSER`
 - `ODYSSEUS_WINDOWS_HOST_OVERRIDE`
+- `ODYSSEUS_OLLAMA_HOST`
 
 Recommended approach:
 

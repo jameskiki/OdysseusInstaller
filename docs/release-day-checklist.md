@@ -14,12 +14,13 @@ Use this checklist when preparing and publishing a new installer version.
 - [ ] Wait for **Build and Release Installer** workflow run to pass.
 - [ ] Download CI artifact `odysseus-installer-<version>` from Actions.
 - [ ] Verify artifact includes:
-- [ ] `OdysseusSetup-<version>.exe`
-- [ ] `OdysseusSetup-<version>.exe.sha256`
+- [ ] `OdysseusSetup-<version>-<branch-slug>.exe` (non-tag CI builds)
+- [ ] `OdysseusSetup-<version>-<branch-slug>.exe.sha256` (non-tag CI builds)
 - [ ] Run installer smoke test on a clean Windows machine/VM:
 - [ ] Local install path
 - [ ] WSL readiness guidance path (if WSL/Ubuntu missing)
-- [ ] Launch script starts and reaches `http://localhost:7000` on prepared hosts
+- [ ] Launch script starts and reaches `http://127.0.0.1:7000` on prepared hosts
+- [ ] Host mode smoke test: client on same LAN can reach `http://<host-ip>:7000` when `ODYSSEUS_HOST_MODE=1` and bind host is non-loopback
 - [ ] Health Audit shortcut runs and reports expected PASS/WARN output categories
 
 ## 3) Tag and publish release
@@ -42,10 +43,14 @@ Use this checklist when preparing and publishing a new installer version.
 - [ ] Fresh install test (local mode) from release asset.
 - [ ] Upgrade/repair path sanity check on a machine with prior install.
 - [ ] Config override sanity checks:
+- [ ] `ODYSSEUS_DEPLOYMENT_MODE`
 - [ ] `ODYSSEUS_REPO_REF`
 - [ ] `ODYSSEUS_REPO_SYNC_MODE`
 - [ ] `ODYSSEUS_REBUILD_MODE`
+- [ ] `ODYSSEUS_OPEN_BROWSER`
+- [ ] `ODYSSEUS_APP_BIND_HOST`
 - [ ] Optional host override path (`ODYSSEUS_WINDOWS_HOST_OVERRIDE`) validates as expected
+- [ ] Optional host override path (`ODYSSEUS_OLLAMA_HOST`) validates as expected
 
 ## 6) Wrap-up
 
